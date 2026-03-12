@@ -1,0 +1,17 @@
+services:
+  translator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      TRANSLATOR_HOST: 0.0.0.0
+      TRANSLATOR_PORT: 8000
+      TRANSLATOR_OPEN_BROWSER: "false"
+      TRANSLATOR_MODELS_DIR: /app/models
+      TRANSLATOR_WORKSPACE_DIR: /app/workspace
+      TRANSLATOR_FRONTEND_DIST_DIR: /app/frontend_dist
+    volumes:
+      - ./models:/app/models
+      - ./workspace:/app/workspace

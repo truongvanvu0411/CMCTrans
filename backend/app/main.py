@@ -40,6 +40,8 @@ from .services.excel_jobs import ExcelJobError, ExcelJobService
 from .services.glossary import GlossaryService
 from .services.knowledge_base import KnowledgeBaseError, KnowledgeBaseService
 from .services.knowledge_translation import KnowledgeAwareTranslationService
+from .services.ocr_document import PaddleOcrService, SupportsDocumentOcr
+from .services.ocr_layout import PillowOcrLayoutRenderer, SupportsOcrLayoutRenderer
 from .services.translation import SupportsTranslation, TranslationError, TranslationService
 
 
@@ -53,6 +55,8 @@ class AppState:
         memory_repository: TranslationMemoryRepository,
         correction_repository: CorrectionRepository,
         translation_service: SupportsTranslation,
+        ocr_service: SupportsDocumentOcr,
+        ocr_layout_renderer: SupportsOcrLayoutRenderer,
         excel_job_service: ExcelJobService,
         glossary: GlossaryService,
         knowledge_base_service: KnowledgeBaseService,
@@ -63,6 +67,8 @@ class AppState:
         self.memory_repository = memory_repository
         self.correction_repository = correction_repository
         self.translation_service = translation_service
+        self.ocr_service = ocr_service
+        self.ocr_layout_renderer = ocr_layout_renderer
         self.excel_job_service = excel_job_service
         self.glossary = glossary
         self.knowledge_base_service = knowledge_base_service
@@ -72,6 +78,8 @@ def create_app(
     *,
     config: AppConfig | None = None,
     translation_service: SupportsTranslation | None = None,
+    ocr_service: SupportsDocumentOcr | None = None,
+    ocr_layout_renderer: SupportsOcrLayoutRenderer | None = None,
 ) -> FastAPI:
     app_config = config or get_config()
     connection = connect_database(app_config.database_path)
@@ -97,12 +105,18 @@ def create_app(
         memory_repository=memory_repository,
         glossary=glossary,
     )
+    resolved_ocr_service = ocr_service or PaddleOcrService(
+        models_dir=app_config.models_dir
+    )
+    resolved_ocr_layout_renderer = ocr_layout_renderer or PillowOcrLayoutRenderer()
     excel_job_service = ExcelJobService(
         config=app_config,
         repository=repository,
         memory_repository=memory_repository,
         correction_repository=correction_repository,
         translation_service=resolved_translation_service,
+        ocr_service=resolved_ocr_service,
+        ocr_layout_renderer=resolved_ocr_layout_renderer,
         glossary=glossary,
     )
     app_state = AppState(
@@ -112,6 +126,8 @@ def create_app(
         memory_repository=memory_repository,
         correction_repository=correction_repository,
         translation_service=resolved_translation_service,
+        ocr_service=resolved_ocr_service,
+        ocr_layout_renderer=resolved_ocr_layout_renderer,
         excel_job_service=excel_job_service,
         glossary=glossary,
         knowledge_base_service=knowledge_base_service,
@@ -225,12 +241,38 @@ def _memory_entry_to_model(entry: TranslationMemoryRecord) -> TranslationMemoryE
 
 
 def register_routes(app: FastAPI) -> None:
-    def download_media_type(file_type: str) -> str:
-        if file_type == "xlsx":
+    def media_type_from_suffix(suffix: str) -> str:
+        if suffix == ".xlsx":
             return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        if file_type == "pptx":
+        if suffix == ".pptx":
             return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_type}.")
+        if suffix == ".pdf":
+            return "application/pdf"
+        if suffix == ".png":
+            return "image/png"
+        if suffix in {".jpg", ".jpeg"}:
+            return "image/jpeg"
+        if suffix == ".bmp":
+            return "image/bmp"
+        if suffix == ".webp":
+            return "image/webp"
+        raise HTTPException(status_code=400, detail=f"Unsupported file suffix: {suffix}.")
+
+    def download_media_type(job: JobRecord) -> str:
+        if job.output_file_path:
+            return media_type_from_suffix(Path(job.output_file_path).suffix.lower())
+        if job.file_type == "xlsx":
+            return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        if job.file_type == "pptx":
+            return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        if job.file_type == "pdf":
+            return "application/pdf"
+        if job.file_type == "image":
+            return "image/png"
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {job.file_type}.")
+
+    def source_media_type(job: JobRecord) -> str:
+        return media_type_from_suffix(Path(job.original_file_path).suffix.lower())
 
     @app.get("/api/health")
     def healthcheck() -> dict[str, str]:
@@ -440,6 +482,15 @@ def register_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return _segment_to_model(segment)
 
+    @app.post("/api/excel/jobs/{job_id}/review-complete", response_model=JobSummaryModel)
+    def complete_excel_job_review(job_id: str) -> JobSummaryModel:
+        service = get_state(app).excel_job_service
+        try:
+            job = service.complete_review(job_id)
+        except ExcelJobError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _job_to_model(job)
+
     @app.post("/api/excel/jobs/{job_id}/preview", response_model=PreviewResponse)
     def preview_excel_job(job_id: str) -> PreviewResponse:
         service = get_state(app).excel_job_service
@@ -469,8 +520,21 @@ def register_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="Exported document was not found.")
         return FileResponse(
             path=job.output_file_path,
-            media_type=download_media_type(job.file_type),
+            media_type=download_media_type(job),
             filename=Path(job.output_file_path).name,
+        )
+
+    @app.get("/api/excel/jobs/{job_id}/source-document")
+    def source_excel_job_document(job_id: str) -> Response:
+        service = get_state(app).excel_job_service
+        try:
+            job = service.get_job(job_id)
+        except ExcelJobError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return FileResponse(
+            path=job.original_file_path,
+            media_type=source_media_type(job),
+            filename=Path(job.original_file_path).name,
         )
 
 

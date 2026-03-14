@@ -26,6 +26,17 @@ from .excel_ooxml import (
     parse_workbook,
 )
 from .glossary import GlossaryService
+from .ocr_document import (
+    DocumentOcrError,
+    ExtractedOcrSegment,
+    ParsedOcrDocument,
+    SupportsDocumentOcr,
+)
+from .ocr_layout import (
+    DocumentLayoutError,
+    RenderableOcrSegment,
+    SupportsOcrLayoutRenderer,
+)
 from .pptx_ooxml import (
     ExtractedSlideSegment,
     ParseProgress as PptxParseProgress,
@@ -52,40 +63,78 @@ def _document_label(file_type: str) -> str:
         return "workbook"
     if file_type == "pptx":
         return "presentation"
+    if file_type == "pdf":
+        return "PDF document"
+    if file_type == "image":
+        return "image document"
     return "document"
 
 
+def _resolve_upload_file_type(file_name: str) -> tuple[str, str]:
+    lower_file_name = file_name.lower()
+    if lower_file_name.endswith(".xlsx"):
+        return "xlsx", ".xlsx"
+    if lower_file_name.endswith(".pptx"):
+        return "pptx", ".pptx"
+    if lower_file_name.endswith(".pdf"):
+        return "pdf", ".pdf"
+    for image_suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+        if lower_file_name.endswith(image_suffix):
+            return "image", image_suffix
+    raise ExcelJobError(
+        "Only .xlsx, .pptx, .pdf, .png, .jpg, .jpeg, .bmp, and .webp files are supported."
+    )
+
+
 def _parsed_segments(
-    parsed_document: ParsedWorkbook | ParsedPresentation,
-) -> list[ExtractedSegment | ExtractedSlideSegment]:
+    parsed_document: ParsedWorkbook | ParsedPresentation | ParsedOcrDocument,
+) -> list[ExtractedSegment | ExtractedSlideSegment | ExtractedOcrSegment]:
     return parsed_document.segments
 
 
-def _parsed_summary(parsed_document: ParsedWorkbook | ParsedPresentation) -> dict[str, object]:
+def _parsed_summary(
+    parsed_document: ParsedWorkbook | ParsedPresentation | ParsedOcrDocument,
+) -> dict[str, object]:
     return parsed_document.parse_summary
 
 
-def _segment_location_type(segment: ExtractedSegment | ExtractedSlideSegment) -> str:
+def _segment_location_type(
+    segment: ExtractedSegment | ExtractedSlideSegment | ExtractedOcrSegment,
+) -> str:
     if isinstance(segment, ExtractedSlideSegment):
+        return segment.location_type
+    if isinstance(segment, ExtractedOcrSegment):
         return segment.location_type
     return "worksheet_cell"
 
 
-def _segment_group_name(segment: ExtractedSegment | ExtractedSlideSegment) -> str:
+def _segment_group_name(
+    segment: ExtractedSegment | ExtractedSlideSegment | ExtractedOcrSegment,
+) -> str:
     if isinstance(segment, ExtractedSlideSegment):
         return segment.slide_name
+    if isinstance(segment, ExtractedOcrSegment):
+        return segment.page_name
     return segment.sheet_name
 
 
-def _segment_reference(segment: ExtractedSegment | ExtractedSlideSegment) -> str:
+def _segment_reference(
+    segment: ExtractedSegment | ExtractedSlideSegment | ExtractedOcrSegment,
+) -> str:
     if isinstance(segment, ExtractedSlideSegment):
         return segment.object_label
+    if isinstance(segment, ExtractedOcrSegment):
+        return segment.block_label
     return segment.cell_address
 
 
-def _segment_index(segment: ExtractedSegment | ExtractedSlideSegment) -> int:
+def _segment_index(
+    segment: ExtractedSegment | ExtractedSlideSegment | ExtractedOcrSegment,
+) -> int:
     if isinstance(segment, ExtractedSlideSegment):
         return segment.slide_index
+    if isinstance(segment, ExtractedOcrSegment):
+        return segment.page_index
     return segment.sheet_index
 
 
@@ -113,6 +162,8 @@ class ExcelJobService:
         memory_repository: TranslationMemoryRepository,
         correction_repository: CorrectionRepository,
         translation_service: SupportsTranslation,
+        ocr_service: SupportsDocumentOcr,
+        ocr_layout_renderer: SupportsOcrLayoutRenderer,
         glossary: GlossaryService,
     ) -> None:
         self._config = config
@@ -120,21 +171,15 @@ class ExcelJobService:
         self._memory_repository = memory_repository
         self._correction_repository = correction_repository
         self._translation_service = translation_service
+        self._ocr_service = ocr_service
+        self._ocr_layout_renderer = ocr_layout_renderer
         self._glossary = glossary
         self._active_jobs: set[str] = set()
         self._active_jobs_lock = threading.Lock()
         (self._config.workspace_dir / "jobs").mkdir(parents=True, exist_ok=True)
 
     def create_job(self, *, file_name: str, file_bytes: bytes) -> JobRecord:
-        lower_file_name = file_name.lower()
-        if lower_file_name.endswith(".xlsx"):
-            file_type = "xlsx"
-            original_suffix = ".xlsx"
-        elif lower_file_name.endswith(".pptx"):
-            file_type = "pptx"
-            original_suffix = ".pptx"
-        else:
-            raise ExcelJobError("Only .xlsx and .pptx files are supported.")
+        file_type, original_suffix = _resolve_upload_file_type(file_name)
 
         job_id = str(uuid.uuid4())
         job_dir = self._config.workspace_dir / "jobs" / job_id
@@ -279,7 +324,7 @@ class ExcelJobService:
             progress_percent=96,
             processed_segments=job.processed_segments,
             total_segments=job.total_segments,
-            status_message="Review updated. Preview must be regenerated.",
+            status_message="Review updated. Download will rebuild the document.",
             current_sheet=None,
             current_cell=None,
             preview_ready=False,
@@ -298,14 +343,12 @@ class ExcelJobService:
         )
         if clean_correction is not None:
             now = _utc_now()
-            self._memory_repository.upsert(
-                entry_id=str(uuid.uuid4()),
+            self._upsert_bidirectional_memory(
                 source_language=source_language,
                 target_language=target_language,
                 source_text=clean_correction.source_text,
                 translated_text=clean_correction.corrected_translation,
-                created_at=now,
-                updated_at=now,
+                now=now,
             )
             self._correction_repository.create(
                 CorrectionRecord(
@@ -324,6 +367,60 @@ class ExcelJobService:
         if updated_segment is None:
             raise ExcelJobError("Updated segment could not be loaded.")
         return updated_segment
+
+    def complete_review(self, job_id: str) -> JobRecord:
+        job = self.get_job(job_id)
+        if job.status != "review":
+            raise ExcelJobError("Job must be in review state before marking review done.")
+        self._update_job(
+            job_id,
+            status="completed",
+            current_step="review",
+            progress_percent=97,
+            processed_segments=job.processed_segments,
+            total_segments=job.total_segments,
+            status_message="Review complete. Download is ready.",
+            current_sheet=None,
+            current_cell=None,
+            preview_ready=job.preview_ready,
+            preview_summary=job.preview_summary,
+            source_language=job.source_language,
+            target_language=job.target_language,
+            parse_summary=job.parse_summary,
+            translation_summary=job.translation_summary,
+            output_file_path=job.output_file_path,
+        )
+        return self.get_job(job_id)
+
+    def _upsert_bidirectional_memory(
+        self,
+        *,
+        source_language: str,
+        target_language: str,
+        source_text: str,
+        translated_text: str,
+        now: datetime,
+    ) -> None:
+        self._memory_repository.upsert(
+            entry_id=str(uuid.uuid4()),
+            source_language=source_language,
+            target_language=target_language,
+            source_text=source_text,
+            translated_text=translated_text,
+            created_at=now,
+            updated_at=now,
+        )
+        if source_language == target_language:
+            return
+        self._memory_repository.upsert(
+            entry_id=str(uuid.uuid4()),
+            source_language=target_language,
+            target_language=source_language,
+            source_text=translated_text,
+            translated_text=source_text,
+            created_at=now,
+            updated_at=now,
+        )
 
     def _translate_sheet_name_updates(self, job: JobRecord) -> dict[str, str]:
         if job.file_type != "xlsx":
@@ -478,9 +575,15 @@ class ExcelJobService:
     def download_job(self, job_id: str) -> ExportedWorkbook:
         job = self.get_job(job_id)
         if job.status not in {"review", "completed"}:
-            raise ExcelJobError("Job must be in review state before download.")
-        if not job.preview_ready:
-            raise ExcelJobError("Preview must be generated before download.")
+            raise ExcelJobError("Finish review before download.")
+
+        export_status = "completed" if job.status == "completed" else "review"
+        export_progress = 97 if export_status == "completed" else 96
+        export_message = (
+            "Review complete. Download is ready."
+            if export_status == "completed"
+            else "Translation complete. Open the editor to review and download when ready."
+        )
 
         self._update_job(
             job_id,
@@ -533,13 +636,52 @@ class ExcelJobService:
                         for segment in exportable_segments
                     ],
                 )
+            elif job.file_type in {"pdf", "image"}:
+                rendered_document = self._ocr_layout_renderer.render_document(
+                    file_path=Path(job.original_file_path),
+                    file_type=job.file_type,
+                    translated_segments=[
+                        RenderableOcrSegment(
+                            page_name=segment.sheet_name,
+                            block_label=segment.cell_address,
+                            locator=segment.locator,
+                            final_text=segment.final_text or "",
+                        )
+                        for segment in exportable_segments
+                    ],
+                )
+                exported_bytes = rendered_document.file_bytes
             else:
                 raise ExcelJobError(f"Unsupported file type: {job.file_type}.")
-        except (ExcelOOXMLError, PptxOOXMLError) as exc:
-            self._fail_job(job_id, str(exc))
+        except (ExcelOOXMLError, PptxOOXMLError, DocumentOcrError, DocumentLayoutError) as exc:
+            self._update_job(
+                job_id,
+                status=export_status,
+                current_step="review",
+                progress_percent=export_progress,
+                processed_segments=job.processed_segments,
+                total_segments=job.total_segments,
+                status_message=str(exc),
+                current_sheet=None,
+                current_cell=None,
+                preview_ready=job.preview_ready,
+                preview_summary=job.preview_summary,
+                source_language=job.source_language,
+                target_language=job.target_language,
+                parse_summary=job.parse_summary,
+                translation_summary=job.translation_summary,
+                output_file_path=job.output_file_path,
+            )
             raise ExcelJobError(str(exc)) from exc
 
-        output_suffix = ".xlsx" if job.file_type == "xlsx" else ".pptx"
+        if job.file_type == "xlsx":
+            output_suffix = ".xlsx"
+        elif job.file_type == "pptx":
+            output_suffix = ".pptx"
+        elif job.file_type in {"pdf", "image"}:
+            output_suffix = rendered_document.output_suffix
+        else:
+            raise ExcelJobError(f"Unsupported file type: {job.file_type}.")
         output_file_name = f"{Path(job.original_file_name).stem}.{target_language}{output_suffix}"
         output_file_path = Path(job.original_file_path).parent / output_file_name
         output_file_path.write_bytes(exported_bytes)
@@ -570,6 +712,8 @@ class ExcelJobService:
             self._run_translation(job_id, source_language, target_language)
         except ExcelJobError as exc:
             self._fail_job(job_id, str(exc))
+        except Exception as exc:
+            self._fail_job(job_id, f"Unexpected processing error: {exc}")
         finally:
             with self._active_jobs_lock:
                 self._active_jobs.discard(job_id)
@@ -650,9 +794,15 @@ class ExcelJobService:
                     Path(job.original_file_path).read_bytes(),
                     progress_callback=on_pptx_parse_progress,
                 )
+            elif job.file_type in {"pdf", "image"}:
+                parsed_document = self._ocr_service.parse_document(
+                    file_path=Path(job.original_file_path),
+                    file_type=job.file_type,
+                    source_language=source_language,
+                )
             else:
                 raise ExcelJobError(f"Unsupported file type: {job.file_type}.")
-        except (ExcelOOXMLError, PptxOOXMLError) as exc:
+        except (ExcelOOXMLError, PptxOOXMLError, DocumentOcrError) as exc:
             raise ExcelJobError(str(exc)) from exc
 
         now = _utc_now()
@@ -776,7 +926,7 @@ class ExcelJobService:
             progress_percent=96,
             processed_segments=total_segments,
             total_segments=total_segments,
-            status_message="Translation complete. Review before preview and download.",
+            status_message="Translation complete. Open the editor to review and download when ready.",
             current_sheet=None,
             current_cell=None,
             preview_ready=False,

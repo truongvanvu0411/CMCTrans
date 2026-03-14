@@ -11,7 +11,7 @@ export type LanguagePair = {
 export type JobSummary = {
   id: string
   original_file_name: string
-  file_type: 'xlsx' | 'pptx'
+  file_type: 'xlsx' | 'pptx' | 'pdf' | 'image'
   status: string
   current_step: string
   progress_percent: number

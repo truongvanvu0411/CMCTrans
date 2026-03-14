@@ -1,7 +1,12 @@
-import { useId, useRef } from 'react'
-import type { ChangeEvent } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
+import type { ChangeEvent, DragEvent, KeyboardEvent } from 'react'
 
 import type { LanguagePair } from '../types'
+import {
+  clipboardImageFile,
+  firstFileFromList,
+  isEditablePasteTarget,
+} from './uploadFileInteractions'
 
 type UploadPanelProps = {
   disabled: boolean
@@ -45,17 +50,113 @@ export function UploadPanel({
 }: UploadPanelProps) {
   const inputId = useId()
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const dragDepthRef = useRef(0)
+  const [isDraggingFile, setIsDraggingFile] = useState(false)
   const currentPair = languagePairs.find((pair) => pair.source.code === sourceLanguage) ?? null
   const targetOptions = currentPair?.targets ?? []
 
-  async function handleChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0]
+  async function uploadFile(file: File | null) {
     if (!file) {
       return
     }
     await onUpload(file)
+  }
+
+  async function handleChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = firstFileFromList(event.target.files)
+    if (!file) {
+      return
+    }
+    await uploadFile(file)
     event.target.value = ''
   }
+
+  function handleDragEnter(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (disabled) {
+      return
+    }
+    dragDepthRef.current += 1
+    setIsDraggingFile(true)
+  }
+
+  function handleDragOver(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (disabled) {
+      return
+    }
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'copy'
+    }
+    setIsDraggingFile(true)
+  }
+
+  function handleDragLeave(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (disabled) {
+      return
+    }
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+    if (dragDepthRef.current === 0) {
+      setIsDraggingFile(false)
+    }
+  }
+
+  function handleDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault()
+    event.stopPropagation()
+    dragDepthRef.current = 0
+    setIsDraggingFile(false)
+    if (disabled) {
+      return
+    }
+    const file = firstFileFromList(event.dataTransfer?.files)
+    void uploadFile(file)
+  }
+
+  function openFilePicker() {
+    if (disabled) {
+      return
+    }
+    inputRef.current?.click()
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (disabled) {
+      return
+    }
+    if (event.key !== 'Enter' && event.key !== ' ') {
+      return
+    }
+    event.preventDefault()
+    openFilePicker()
+  }
+
+  useEffect(() => {
+    if (disabled) {
+      return undefined
+    }
+
+    function handlePaste(event: ClipboardEvent) {
+      if (isEditablePasteTarget(event.target)) {
+        return
+      }
+      const imageFile = clipboardImageFile(event.clipboardData)
+      if (!imageFile) {
+        return
+      }
+      event.preventDefault()
+      void uploadFile(imageFile)
+    }
+
+    window.addEventListener('paste', handlePaste)
+    return () => {
+      window.removeEventListener('paste', handlePaste)
+    }
+  }, [disabled, onUpload])
 
   return (
     <section className="panel">
@@ -108,26 +209,44 @@ export function UploadPanel({
         </div>
       </div>
 
-      <div className="upload-drop">
+      <div
+        className={`upload-drop${isDraggingFile ? ' is-dragging' : ''}${disabled ? ' is-disabled' : ''}`}
+        role="button"
+        tabIndex={disabled ? -1 : 0}
+        aria-disabled={disabled}
+        aria-label="Upload document"
+        onClick={openFilePicker}
+        onKeyDown={handleKeyDown}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
         <div className="upload-drop-content">
           <div className="upload-copy-group">
             <div className="upload-icon-shell">
               <UploadIcon />
             </div>
             <div className="upload-copy">
-              <strong>Drag and drop your document here, or click to browse.</strong>
-              <span>Supports `.xlsx` and `.pptx` files for extraction and review.</span>
+              <strong>Drag and drop your document here, paste an image, or click to browse.</strong>
+              <span>
+                Supports `.xlsx`, `.pptx`, `.pdf`, `.png`, `.jpg`, `.jpeg`, `.bmp`, and
+                `.webp` files for extraction and review.
+              </span>
             </div>
           </div>
           <div className="upload-action-group">
-            <button
-              type="button"
-              className="upload-browse-button"
-              disabled={disabled}
-              onClick={() => inputRef.current?.click()}
-            >
-              Browse document
-            </button>
+              <button
+                type="button"
+                className="upload-browse-button"
+                disabled={disabled}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  openFilePicker()
+                }}
+              >
+                Browse document
+              </button>
             {selectedFileName ? (
               <p className="upload-selected">Selected: {selectedFileName}</p>
             ) : null}
@@ -137,7 +256,7 @@ export function UploadPanel({
             id={inputId}
             className="upload-input-hidden"
             type="file"
-            accept=".xlsx,.pptx"
+            accept=".xlsx,.pptx,.pdf,.png,.jpg,.jpeg,.bmp,.webp"
             disabled={disabled}
             onChange={(event) => {
               void handleChange(event)
@@ -145,6 +264,10 @@ export function UploadPanel({
           />
         </div>
       </div>
+      <p className="hint upload-experimental-note">
+        Lưu ý: Tính năng dịch image và PDF đang trong quá trình thử nghiệm, nên layout
+        output cuối cùng hiện chưa được tối ưu hóa.
+      </p>
     </section>
   )
 }

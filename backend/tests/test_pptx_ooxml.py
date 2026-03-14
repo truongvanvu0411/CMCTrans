@@ -261,6 +261,111 @@ def build_overflow_presentation() -> bytes:
     return buffer.getvalue()
 
 
+def build_smartart_presentation() -> bytes:
+    parts = {
+        "[Content_Types].xml": """<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+</Types>
+""",
+        "_rels/.rels": """<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>
+</Relationships>
+""",
+        "ppt/presentation.xml": """<?xml version="1.0" encoding="UTF-8"?>
+<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+ xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst>
+  <p:sldSz cx="9144000" cy="6858000"/>
+</p:presentation>
+""",
+        "ppt/_rels/presentation.xml.rels": """<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+</Relationships>
+""",
+        "ppt/slides/slide1.xml": """<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+ xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+ xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+      <p:grpSpPr/>
+      <p:graphicFrame>
+        <p:nvGraphicFramePr>
+          <p:cNvPr id="5" name="SmartArt Process"/>
+          <p:cNvGraphicFramePr/>
+          <p:nvPr/>
+        </p:nvGraphicFramePr>
+        <p:xfrm>
+          <a:off x="1200000" y="1600000"/>
+          <a:ext cx="4200000" cy="2200000"/>
+        </p:xfrm>
+        <a:graphic>
+          <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram">
+            <dgm:relIds r:dm="rIdSmartArtData1"/>
+          </a:graphicData>
+        </a:graphic>
+      </p:graphicFrame>
+    </p:spTree>
+  </p:cSld>
+</p:sld>
+""",
+        "ppt/slides/_rels/slide1.xml.rels": """<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdSmartArtData1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="../diagrams/data1.xml"/>
+</Relationships>
+""",
+        "ppt/diagrams/data1.xml": """<?xml version="1.0" encoding="UTF-8"?>
+<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"
+ xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <dgm:ptLst>
+    <dgm:pt modelId="0" type="doc"/>
+    <dgm:pt modelId="1">
+      <dgm:spPr><a:solidFill><a:srgbClr val="DAEEF3"/></a:solidFill></dgm:spPr>
+      <dgm:t>
+        <a:bodyPr anchor="ctr"/>
+        <a:lstStyle/>
+        <a:p>
+          <a:pPr algn="ctr"/>
+          <a:r>
+            <a:rPr sz="1800" b="1"><a:solidFill><a:srgbClr val="0F243E"/></a:solidFill></a:rPr>
+            <a:t>顧客管理</a:t>
+          </a:r>
+          <a:endParaRPr sz="1800"/>
+        </a:p>
+      </dgm:t>
+    </dgm:pt>
+    <dgm:pt modelId="2">
+      <dgm:t>
+        <a:bodyPr/>
+        <a:lstStyle/>
+        <a:p>
+          <a:r><a:rPr sz="1600"/><a:t>業務部門</a:t></a:r>
+          <a:endParaRPr sz="1600"/>
+        </a:p>
+      </dgm:t>
+    </dgm:pt>
+  </dgm:ptLst>
+  <dgm:cxnLst/>
+</dgm:dataModel>
+""",
+    }
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for entry_name, content in parts.items():
+            archive.writestr(entry_name, content)
+    return buffer.getvalue()
+
+
 class PptxOOXMLTests(unittest.TestCase):
     def test_parse_presentation_extracts_shape_table_and_chart_text(self) -> None:
         parsed = parse_presentation(build_test_presentation())
@@ -374,6 +479,63 @@ class PptxOOXMLTests(unittest.TestCase):
             slide_xml = archive.read("ppt/slides/slide1.xml").decode("utf-8")
 
         self.assertIn('sz="1000"', slide_xml)
+
+    def test_parse_presentation_extracts_smartart_text(self) -> None:
+        parsed = parse_presentation(build_smartart_presentation())
+
+        self.assertEqual(parsed.parse_summary["total_slides"], 1)
+        self.assertEqual(parsed.parse_summary["total_extracted_segments"], 2)
+        self.assertEqual(
+            [segment.location_type for segment in parsed.segments],
+            ["smartart_text", "smartart_text"],
+        )
+        self.assertEqual(parsed.segments[0].object_label, "SmartArt Process - node 1 - paragraph 1")
+        self.assertEqual(parsed.segments[0].original_text, "顧客管理")
+        self.assertEqual(parsed.segments[0].locator["package_part"], "ppt/diagrams/data1.xml")
+        self.assertEqual(parsed.segments[0].locator["point_model_id"], "1")
+
+    def test_build_presentation_preview_uses_translated_smartart_text(self) -> None:
+        preview = build_presentation_preview(
+            original_file_bytes=build_smartart_presentation(),
+            translated_segments=[
+                {
+                    "slide_name": "Slide 1",
+                    "object_label": "SmartArt Process - node 1 - paragraph 1",
+                    "final_text": "Customer Management",
+                    "status": "translated",
+                }
+            ],
+        )
+
+        slide_items = preview["slides"][0]["items"]
+        translated_item = next(
+            item
+            for item in slide_items
+            if item["object_label"] == "SmartArt Process - node 1 - paragraph 1"
+        )
+        self.assertEqual(translated_item["final_text"], "Customer Management")
+        self.assertEqual(translated_item["status"], "translated")
+        self.assertEqual(translated_item["object_type"], "smartart_text")
+        self.assertEqual(translated_item["fill_color"], "#DAEEF3")
+        self.assertEqual(translated_item["font_color"], "#0F243E")
+        self.assertTrue(translated_item["bold"])
+
+    def test_export_presentation_writes_smartart_text(self) -> None:
+        parsed = parse_presentation(build_smartart_presentation())
+        exported = export_presentation(
+            original_file_bytes=build_smartart_presentation(),
+            segment_updates=[
+                (parsed.segments[0].locator, "Customer Management"),
+                (parsed.segments[1].locator, "Business Team"),
+            ],
+        )
+
+        with zipfile.ZipFile(io.BytesIO(exported)) as archive:
+            data_xml = archive.read("ppt/diagrams/data1.xml").decode("utf-8")
+
+        self.assertIn("Customer Management", data_xml)
+        self.assertIn("Business Team", data_xml)
+        self.assertIn('sz="1800"', data_xml)
 
 
 if __name__ == "__main__":

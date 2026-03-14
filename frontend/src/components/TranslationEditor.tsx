@@ -3,7 +3,7 @@ import { useMemo } from 'react'
 import type { Segment } from '../types'
 
 type TranslationEditorProps = {
-  fileType: 'xlsx' | 'pptx'
+  fileType: 'xlsx' | 'pptx' | 'pdf' | 'image'
   segments: Segment[]
   filterSheet: string
   searchQuery: string
@@ -42,8 +42,8 @@ export function TranslationEditor({
   const sheetOptions = useMemo(() => {
     return [...new Set(segments.map((segment) => segment.sheet_name))]
   }, [segments])
-  const containerLabel = fileType === 'pptx' ? 'Slide' : 'Sheet'
-  const referenceLabel = fileType === 'pptx' ? 'Object' : 'Cell'
+  const containerLabel = fileType === 'pptx' ? 'Slide' : fileType === 'pdf' ? 'Page' : fileType === 'image' ? 'Image' : 'Sheet'
+  const referenceLabel = fileType === 'pptx' ? 'Object' : fileType === 'pdf' || fileType === 'image' ? 'Region' : 'Cell'
 
   return (
     <section className="panel">

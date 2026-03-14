@@ -236,11 +236,41 @@ a {
 }
 
 .upload-drop {
+  position: relative;
   min-height: 150px;
   padding: 24px;
   border: 1px dashed #f4b07f;
   border-radius: 18px;
   background: #fff6f0;
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+.upload-drop:hover {
+  border-color: #e9863d;
+  background: #fff2e7;
+}
+
+.upload-drop:focus-visible {
+  outline: none;
+  border-color: #e9863d;
+  box-shadow: 0 0 0 3px rgba(242, 141, 69, 0.2);
+}
+
+.upload-drop.is-dragging {
+  border-color: #d86e1c;
+  background: #ffe9d9;
+  box-shadow: 0 18px 42px rgba(218, 110, 28, 0.14);
+  transform: translateY(-1px);
+}
+
+.upload-drop.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
 }
 
 .upload-drop-content {
@@ -327,6 +357,10 @@ a {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+.upload-experimental-note {
+  margin-top: 14px;
 }
 
 .two-column-grid {
@@ -513,6 +547,16 @@ input {
   gap: 12px;
   align-items: center;
   margin-top: 18px;
+}
+
+.editor-footer-panel {
+  position: sticky;
+  bottom: 18px;
+}
+
+.editor-footer-actions {
+  justify-content: flex-end;
+  margin-top: 0;
 }
 
 .icon-button {
@@ -718,6 +762,63 @@ input {
   margin: 8px 0 0;
   color: var(--text-muted);
   font-size: 0.85rem;
+}
+
+.document-preview-panel {
+  display: grid;
+  gap: 20px;
+}
+
+.document-preview-grid {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.document-preview-card {
+  display: grid;
+  gap: 14px;
+}
+
+.document-preview-card-header {
+  display: grid;
+  gap: 4px;
+}
+
+.document-preview-card-header span {
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.document-preview-shell {
+  min-height: 420px;
+  border: 1px solid var(--card-border);
+  border-radius: 22px;
+  overflow: hidden;
+  background: #f4f1ea;
+}
+
+.document-preview-frame,
+.document-preview-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 420px;
+  border: 0;
+  background: #ffffff;
+}
+
+.document-preview-image {
+  object-fit: contain;
+}
+
+.document-preview-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: 420px;
+  padding: 24px;
+  color: var(--text-muted);
+  text-align: center;
 }
 
 .excel-preview-shell {
@@ -1063,6 +1164,51 @@ input {
 .error-banner {
   margin: 8px 0 0;
   color: var(--danger);
+}
+
+.toast-banner {
+  position: fixed;
+  top: 24px;
+  right: 24px;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 14px 16px;
+  border: 1px solid transparent;
+  border-radius: 16px;
+  box-shadow: 0 22px 44px rgba(28, 34, 45, 0.18);
+  background: #ffffff;
+}
+
+.toast-banner p {
+  margin: 0;
+  flex: 1 1 auto;
+  color: #2f3747;
+}
+
+.toast-banner.error {
+  border-color: rgba(212, 101, 101, 0.22);
+  background: #fff5f5;
+}
+
+.toast-banner.success {
+  border-color: rgba(41, 179, 164, 0.26);
+  background: #f1fffb;
+}
+
+.toast-banner.info {
+  border-color: rgba(79, 124, 255, 0.22);
+  background: #f4f8ff;
+}
+
+.toast-dismiss-button {
+  border: 0;
+  background: transparent;
+  color: #5f687b;
+  cursor: pointer;
+  font-weight: 700;
 }
 
 .history-table-wrap {
@@ -1530,6 +1676,7 @@ input {
   .summary-card-grid,
   .knowledge-grid,
   .two-column-grid,
+  .document-preview-grid,
   .job-meta-grid,
   .control-grid,
   .table-toolbar,
@@ -1578,6 +1725,13 @@ input {
 
   .knowledge-form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .toast-banner {
+    top: 16px;
+    right: 16px;
+    left: 16px;
+    max-width: none;
   }
 
   .ppt-preview-stage {

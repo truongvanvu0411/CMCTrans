@@ -6,7 +6,7 @@ type ProgressStepperProps = {
   currentCell: string | null
 }
 
-const STEPS = ['uploaded', 'queued', 'parsing', 'translating', 'review', 'preview', 'download']
+const STEPS = ['uploaded', 'queued', 'parsing', 'translating', 'review', 'download']
 
 function getStepLabel(step: string): string {
   const labels: Record<string, string> = {
@@ -15,7 +15,6 @@ function getStepLabel(step: string): string {
     parsing: 'Parsing',
     translating: 'Translating',
     review: 'Review',
-    preview: 'Preview',
     download: 'Download',
     failed: 'Failed',
   }
@@ -29,7 +28,8 @@ export function ProgressStepper({
   currentSheet,
   currentCell,
 }: ProgressStepperProps) {
-  const currentIndex = STEPS.indexOf(currentStep)
+  const normalizedCurrentStep = currentStep === 'preview' ? 'review' : currentStep
+  const currentIndex = STEPS.indexOf(normalizedCurrentStep)
 
   return (
     <section className="panel">
@@ -40,8 +40,8 @@ export function ProgressStepper({
       <div className="stepper-scroll">
         <div className="stepper">
           {STEPS.map((step, index) => {
-            const status =
-              currentStep === 'failed'
+              const status =
+              normalizedCurrentStep === 'failed'
                 ? 'failed'
                 : index < currentIndex
                   ? 'completed'

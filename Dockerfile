@@ -12,9 +12,15 @@ ENV PYTHONUNBUFFERED=1
 ENV TRANSLATOR_HOST=0.0.0.0
 ENV TRANSLATOR_PORT=8000
 ENV TRANSLATOR_OPEN_BROWSER=false
+ENV PIP_DEFAULT_TIMEOUT=300
+ENV PIP_RETRIES=10
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt /app/backend/requirements.txt
-RUN pip install --no-cache-dir -r /app/backend/requirements.txt
+RUN pip install --no-cache-dir --prefer-binary -r /app/backend/requirements.txt
 
 COPY backend /app/backend
 COPY --from=frontend-build /app/frontend/dist /app/frontend_dist

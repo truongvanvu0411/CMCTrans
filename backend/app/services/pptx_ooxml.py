@@ -14,6 +14,7 @@ from lxml import etree
 PPTX_NS = {
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
     "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+    "dgm": "http://schemas.openxmlformats.org/drawingml/2006/diagram",
     "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
     "pkgrel": "http://schemas.openxmlformats.org/package/2006/relationships",
     "rel": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
@@ -364,6 +365,10 @@ def _slide_text_targets(
     slide_root: etree._Element,
 ) -> list[_TextTarget]:
     targets: list[_TextTarget] = []
+    slide_relationships = _extract_relationship_targets(
+        archive,
+        _relationships_path(slide_path),
+    )
     shape_counter = 0
     for shape in slide_root.findall(".//p:sp", PPTX_NS):
         shape_counter += 1
@@ -400,18 +405,26 @@ def _slide_text_targets(
             )
             continue
 
+        smartart_targets = _smartart_targets(
+            archive=archive,
+            frame=graphic_frame,
+            slide_relationships=slide_relationships,
+            slide_path=slide_path,
+            frame_label=frame_label,
+            shape_id=frame_id,
+            shape_bounds=_shape_bounds(graphic_frame),
+        )
+        if smartart_targets:
+            targets.extend(smartart_targets)
+            continue
+
         chart_rel_id = graphic_frame.find(".//c:chart", PPTX_NS)
         if chart_rel_id is None:
             continue
         relationship_id = chart_rel_id.attrib.get(f"{{{PPTX_NS['rel']}}}id")
         if relationship_id is None:
             continue
-        rel_targets = _extract_relationship_targets(
-            archive,
-            _relationships_path(slide_path),
-            REL_TYPE_CHART,
-        )
-        chart_target = rel_targets.get(relationship_id)
+        chart_target = slide_relationships.get(relationship_id)
         if chart_target is None:
             continue
         chart_path = _build_path(slide_path, chart_target)
@@ -542,6 +555,33 @@ def _table_cell_style(cell: etree._Element) -> dict[str, str]:
     }
 
 
+def _smartart_style(point: etree._Element) -> dict[str, str]:
+    shape_props = point.find("dgm:spPr", PPTX_NS)
+    text_body = point.find("dgm:t", PPTX_NS)
+    first_paragraph = text_body.find("a:p", PPTX_NS) if text_body is not None else None
+    paragraph_props = first_paragraph.find("a:pPr", PPTX_NS) if first_paragraph is not None else None
+    first_run_props = first_paragraph.find("a:r/a:rPr", PPTX_NS) if first_paragraph is not None else None
+    body_props = text_body.find("a:bodyPr", PPTX_NS) if text_body is not None else None
+    return {
+        "fill_color": _first_descendant_color(shape_props, ["a:solidFill"]) or "",
+        "line_color": _first_descendant_color(shape_props, ["a:ln/a:solidFill"]) or "",
+        "font_color": _first_descendant_color(
+            text_body,
+            [
+                "a:p/a:r/a:rPr/a:solidFill",
+                "a:p/a:endParaRPr/a:solidFill",
+                "a:lstStyle/a:lvl1pPr/a:defRPr/a:solidFill",
+            ],
+        )
+        or "",
+        "horizontal_align": paragraph_props.attrib.get("algn", "") if paragraph_props is not None else "",
+        "vertical_align": body_props.attrib.get("anchor", "") if body_props is not None else "",
+        "bold": _bool_locator_value(
+            first_run_props is not None and first_run_props.attrib.get("b") == "1"
+        ),
+    }
+
+
 def _paragraph_font_size(paragraph: etree._Element) -> float:
     for xpath in (".//a:rPr", ".//a:defRPr", ".//a:endParaRPr"):
         for node in paragraph.findall(xpath, PPTX_NS):
@@ -631,6 +671,65 @@ def _table_targets(
                         locator=locator,
                     )
                 )
+    return targets
+
+
+def _smartart_targets(
+    *,
+    archive: zipfile.ZipFile,
+    frame: etree._Element,
+    slide_relationships: dict[str, str],
+    slide_path: str,
+    frame_label: str,
+    shape_id: str | None,
+    shape_bounds: dict[str, int] | None,
+) -> list[_TextTarget]:
+    rel_ids = frame.find(".//dgm:relIds", PPTX_NS)
+    if rel_ids is None:
+        return []
+    data_relationship_id = rel_ids.attrib.get(f"{{{PPTX_NS['rel']}}}dm")
+    if not data_relationship_id:
+        return []
+    data_target = slide_relationships.get(data_relationship_id)
+    if data_target is None:
+        return []
+    data_path = _build_path(slide_path, data_target)
+    if data_path not in archive.namelist():
+        return []
+
+    data_root = _parse_xml(archive.read(data_path))
+    targets: list[_TextTarget] = []
+    node_counter = 0
+    for point in data_root.findall(".//dgm:pt", PPTX_NS):
+        text_body = point.find("dgm:t", PPTX_NS)
+        if text_body is None:
+            continue
+        model_id = point.attrib.get("modelId")
+        style_data = _smartart_style(point)
+        paragraph_targets = _paragraph_targets(
+            container=text_body,
+            package_part=data_path,
+            object_label=frame_label,
+            object_type="smartart_text",
+            shape_id=shape_id,
+            shape_bounds=shape_bounds,
+            style_data=style_data,
+        )
+        if not paragraph_targets:
+            continue
+        for target in paragraph_targets:
+            locator = dict(target.locator)
+            if model_id:
+                locator["point_model_id"] = model_id
+            targets.append(
+                _TextTarget(
+                    object_label=f"{frame_label} - node {node_counter + 1} - paragraph {int(locator['paragraph_index']) + 1}",
+                    original_text=target.original_text,
+                    warning_codes=target.warning_codes,
+                    locator=locator,
+                )
+            )
+        node_counter += 1
     return targets
 
 
@@ -911,6 +1010,27 @@ def _patch_part_xml(
             paragraphs = cells[column_index].findall("a:txBody/a:p", PPTX_NS)
             if paragraph_index >= len(paragraphs):
                 raise PptxOOXMLError("Table paragraph index is out of range during PPTX export.")
+            _replace_paragraph_text(
+                paragraphs[paragraph_index],
+                final_text,
+                font_size_pt=float(layout["applied_font_size_pt"]),
+            )
+            continue
+        elif object_type == "smartart_text":
+            point_model_id = locator.get("point_model_id")
+            points = [
+                point
+                for point in root.findall(".//dgm:pt", PPTX_NS)
+                if point_model_id is None or point.attrib.get("modelId") == point_model_id
+            ]
+            if not points or paragraph_index is None:
+                raise PptxOOXMLError("Could not locate SmartArt text during PPTX export.")
+            text_body = points[0].find("dgm:t", PPTX_NS)
+            if text_body is None:
+                raise PptxOOXMLError("SmartArt text body is missing during PPTX export.")
+            paragraphs = text_body.findall("a:p", PPTX_NS)
+            if paragraph_index >= len(paragraphs):
+                raise PptxOOXMLError("SmartArt paragraph index is out of range during PPTX export.")
             _replace_paragraph_text(
                 paragraphs[paragraph_index],
                 final_text,

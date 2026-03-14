@@ -98,14 +98,12 @@ class KnowledgeBaseService:
         now = _utc_now()
         if entry_id is None:
             try:
-                self._memory_repository.upsert(
-                    entry_id=str(uuid.uuid4()),
+                self._upsert_memory_pair(
                     source_language=source_language,
                     target_language=target_language,
                     source_text=normalized_source_text,
                     translated_text=normalized_translated_text,
-                    created_at=now,
-                    updated_at=now,
+                    now=now,
                 )
             except sqlite3.IntegrityError as exc:
                 raise KnowledgeBaseError(
@@ -166,3 +164,33 @@ class KnowledgeBaseService:
             source_text=source_text,
         )
         return exact_entry
+
+    def _upsert_memory_pair(
+        self,
+        *,
+        source_language: str,
+        target_language: str,
+        source_text: str,
+        translated_text: str,
+        now: datetime,
+    ) -> None:
+        self._memory_repository.upsert(
+            entry_id=str(uuid.uuid4()),
+            source_language=source_language,
+            target_language=target_language,
+            source_text=source_text,
+            translated_text=translated_text,
+            created_at=now,
+            updated_at=now,
+        )
+        if source_language == target_language:
+            return
+        self._memory_repository.upsert(
+            entry_id=str(uuid.uuid4()),
+            source_language=target_language,
+            target_language=source_language,
+            source_text=translated_text,
+            translated_text=source_text,
+            created_at=now,
+            updated_at=now,
+        )

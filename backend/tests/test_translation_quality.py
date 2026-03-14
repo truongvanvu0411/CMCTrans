@@ -162,6 +162,47 @@ class TranslationQualityTests(unittest.TestCase):
         self.assertEqual(results[1].translation, "Tài liệu API")
         self.assertEqual(results[1].model_chain, ["stub", "postprocess"])
 
+    def test_translate_many_auto_detects_mixed_language_segments_per_text(self) -> None:
+        delegate = StubTranslationService(
+            {
+                ("en", "ja", "OCR-AI SOLUTIONS"): TranslateResult(
+                    translation="JA::OCR-AI SOLUTIONS",
+                    intermediate_translation=None,
+                    model_chain=["en->ja"],
+                ),
+                ("vi", "ja", "Giải pháp OCR-AI"): TranslateResult(
+                    translation="JA::Giải pháp OCR-AI",
+                    intermediate_translation="EN::Giải pháp OCR-AI",
+                    model_chain=["vi->en", "en->ja"],
+                ),
+            }
+        )
+        service = KnowledgeAwareTranslationService(
+            delegate=delegate,
+            memory_repository=self._memory_repository,
+            glossary=self._glossary,
+        )
+
+        results = service.translate_many(
+            ["OCR-AI SOLUTIONS", "自然言語処理", "Giải pháp OCR-AI"],
+            "vi",
+            "ja",
+        )
+
+        self.assertEqual(results[0].translation, "JA::OCR-AI SOLUTIONS")
+        self.assertEqual(results[0].model_chain, ["en->ja", "postprocess"])
+        self.assertEqual(results[1].translation, "自然言語処理")
+        self.assertEqual(results[1].model_chain, ["passthrough:ja->ja"])
+        self.assertEqual(results[2].translation, "JA::Giải pháp OCR-AI")
+        self.assertEqual(results[2].model_chain, ["vi->en", "en->ja", "postprocess"])
+        self.assertEqual(
+            delegate.calls,
+            [
+                (["OCR-AI SOLUTIONS"], "en", "ja"),
+                (["Giải pháp OCR-AI"], "vi", "ja"),
+            ],
+        )
+
     def test_build_clean_correction_rejects_symbol_and_noop_edits(self) -> None:
         rejected_symbol = build_clean_correction(
             source_text="O",

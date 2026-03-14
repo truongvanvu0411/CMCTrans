@@ -16,13 +16,31 @@ type ErrorResponse = {
 }
 
 function uploadContentType(fileName: string): string {
-  if (fileName.toLowerCase().endsWith('.xlsx')) {
+  const lowerFileName = fileName.toLowerCase()
+  if (lowerFileName.endsWith('.xlsx')) {
     return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   }
-  if (fileName.toLowerCase().endsWith('.pptx')) {
+  if (lowerFileName.endsWith('.pptx')) {
     return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
   }
-  throw new Error('Only .xlsx and .pptx files are supported.')
+  if (lowerFileName.endsWith('.pdf')) {
+    return 'application/pdf'
+  }
+  if (lowerFileName.endsWith('.png')) {
+    return 'image/png'
+  }
+  if (lowerFileName.endsWith('.jpg') || lowerFileName.endsWith('.jpeg')) {
+    return 'image/jpeg'
+  }
+  if (lowerFileName.endsWith('.bmp')) {
+    return 'image/bmp'
+  }
+  if (lowerFileName.endsWith('.webp')) {
+    return 'image/webp'
+  }
+  throw new Error(
+    'Only .xlsx, .pptx, .pdf, .png, .jpg, .jpeg, .bmp, and .webp files are supported.',
+  )
 }
 
 async function parseJsonResponse<T>(response: Response): Promise<T> {
@@ -129,6 +147,13 @@ export async function updateSegment(
     body: JSON.stringify({ final_text: finalText }),
   })
   return parseJsonResponse<Segment>(response)
+}
+
+export async function completeReview(jobId: string): Promise<JobSummary> {
+  const response = await fetch(`/api/excel/jobs/${jobId}/review-complete`, {
+    method: 'POST',
+  })
+  return parseJsonResponse<JobSummary>(response)
 }
 
 export async function previewJob(jobId: string): Promise<{ summary: PreviewSummary }> {

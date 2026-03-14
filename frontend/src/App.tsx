@@ -14,7 +14,6 @@ import {
   fetchProtectedTerms,
   fetchTranslationMemoryEntries,
   prepareDownload,
-  previewJob,
   saveGlossaryEntry,
   saveProtectedTerm,
   saveTranslationMemoryEntry,
@@ -22,14 +21,14 @@ import {
   updateSegment,
   uploadWorkbook,
 } from './api'
+import { DocumentPreviewPanel } from './components/DocumentPreviewPanel'
 import { JobHistory } from './components/JobHistory'
 import { KnowledgeBasePage } from './components/KnowledgeBasePage'
 import { Modal } from './components/Modal'
-import { PresentationPreview } from './components/PresentationPreview'
+import { NotificationToast } from './components/NotificationToast'
 import { ProgressStepper } from './components/ProgressStepper'
 import { navigateToRoute, parseHashRoute } from './routes'
 import { Sidebar } from './components/Sidebar'
-import { SpreadsheetPreview } from './components/SpreadsheetPreview'
 import { TranslationEditor } from './components/TranslationEditor'
 import { UploadPanel } from './components/UploadPanel'
 import type {
@@ -37,7 +36,6 @@ import type {
   JobSummary,
   KnowledgeSummary,
   LanguagePair,
-  PreviewSummary,
   ProtectedTerm,
   Segment,
   TranslationMemoryEntry,
@@ -47,20 +45,10 @@ const DEFAULT_SOURCE_LANGUAGE = 'ja'
 const DEFAULT_TARGET_LANGUAGE = 'en'
 const POLLABLE_STATUSES = new Set(['queued', 'parsing', 'translating'])
 type TranslatedRoutePage = 'translated-detail' | 'translated-editor'
-
-function PreviewIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" className="button-icon">
-      <path
-        d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Zm10 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  )
+type ToastTone = 'error' | 'success' | 'info'
+type ToastState = {
+  message: string
+  tone: ToastTone
 }
 
 export default function App() {
@@ -78,16 +66,35 @@ export default function App() {
   const [starting, setStarting] = useState(false)
   const [deletingJobId, setDeletingJobId] = useState<string | null>(null)
   const [savingSegmentId, setSavingSegmentId] = useState<string | null>(null)
-  const [previewSummary, setPreviewSummary] = useState<PreviewSummary | null>(null)
-  const [downloadUrl, setDownloadUrl] = useState<string | null>(null)
-  const [previewOpen, setPreviewOpen] = useState(false)
+  const [previewingDocument, setPreviewingDocument] = useState(false)
+  const [documentPreviewVersion, setDocumentPreviewVersion] = useState(0)
   const [warningsOpen, setWarningsOpen] = useState(false)
-  const [error, setError] = useState('')
+  const [toast, setToast] = useState<ToastState | null>(null)
   const [knowledgeSummary, setKnowledgeSummary] = useState<KnowledgeSummary | null>(null)
   const [glossaryEntries, setGlossaryEntries] = useState<GlossaryEntry[]>([])
   const [protectedTerms, setProtectedTerms] = useState<ProtectedTerm[]>([])
   const [memoryEntries, setMemoryEntries] = useState<TranslationMemoryEntry[]>([])
   const [knowledgeBusyKey, setKnowledgeBusyKey] = useState<string | null>(null)
+
+  function clearToast() {
+    setToast(null)
+  }
+
+  function showToast(message: string, tone: ToastTone = 'error') {
+    setToast({ message, tone })
+  }
+
+  useEffect(() => {
+    if (toast === null) {
+      return undefined
+    }
+    const timeoutId = window.setTimeout(() => {
+      setToast(null)
+    }, 10000)
+    return () => {
+      window.clearTimeout(timeoutId)
+    }
+  }, [toast])
 
   useEffect(() => {
     function handleHashChange() {
@@ -118,7 +125,7 @@ export default function App() {
           })
         }
       } catch (loadError) {
-        setError(loadError instanceof Error ? loadError.message : 'Could not load dashboard.')
+        showToast(loadError instanceof Error ? loadError.message : 'Could not load dashboard.')
       }
     }
 
@@ -156,7 +163,7 @@ export default function App() {
       return
     }
     void refreshKnowledge().catch((loadError) => {
-      setError(loadError instanceof Error ? loadError.message : 'Could not load knowledge base.')
+      showToast(loadError instanceof Error ? loadError.message : 'Could not load knowledge base.')
     })
   }, [route.page])
 
@@ -165,11 +172,24 @@ export default function App() {
       return
     }
     const interval = window.setInterval(() => {
+      const previousStatus = job.status
       void reloadJob(job.id, {
         includeSegments: route.page === 'translated-editor',
         filterSheet,
         searchQuery,
       })
+        .then((nextJob) => {
+          if (
+            route.page === 'dashboard' &&
+            POLLABLE_STATUSES.has(previousStatus) &&
+            nextJob.status === 'review'
+          ) {
+            void openJob(nextJob.id, { page: 'translated-editor' })
+          }
+        })
+        .catch((loadError) => {
+          showToast(loadError instanceof Error ? loadError.message : 'Could not refresh job.')
+        })
     }, 1000)
     return () => {
       window.clearInterval(interval)
@@ -217,9 +237,6 @@ export default function App() {
     setJob(null)
     setSegments([])
     setSegmentDrafts({})
-    setPreviewSummary(null)
-    setDownloadUrl(null)
-    setPreviewOpen(false)
     setFilterSheet('')
     setSearchQuery('')
     setSourceLanguage(DEFAULT_SOURCE_LANGUAGE)
@@ -230,8 +247,14 @@ export default function App() {
     setJob(nextJob)
     setSourceLanguage(nextJob.source_language ?? DEFAULT_SOURCE_LANGUAGE)
     setTargetLanguage(nextJob.target_language ?? DEFAULT_TARGET_LANGUAGE)
-    setPreviewSummary(nextJob.preview_ready ? nextJob.preview_summary : null)
-    setDownloadUrl(nextJob.output_file_name ? `/api/excel/jobs/${nextJob.id}/download` : null)
+  }
+
+  function buildSourceDocumentPreviewUrl(jobId: string): string {
+    return `/api/excel/jobs/${jobId}/source-document`
+  }
+
+  function buildOutputDocumentPreviewUrl(jobId: string, version: number): string {
+    return `/api/excel/jobs/${jobId}/download?preview=${version}`
   }
 
   async function loadSegmentsForJob(
@@ -258,7 +281,7 @@ export default function App() {
       filterSheet?: string
       searchQuery?: string
     },
-  ) {
+  ): Promise<JobSummary> {
     const nextJob = await fetchJob(jobId)
     syncJobState(nextJob)
     if (options?.includeSegments) {
@@ -271,9 +294,9 @@ export default function App() {
       setSegments([])
       setSegmentDrafts({})
     }
-    setPreviewOpen(false)
     setWarningsOpen(false)
     await refreshJobs()
+    return nextJob
   }
 
   async function openJob(
@@ -283,8 +306,7 @@ export default function App() {
       page?: TranslatedRoutePage
     },
   ) {
-    setError('')
-    setPreviewOpen(false)
+    clearToast()
     const targetPage = options?.page ?? 'translated-detail'
     await reloadJob(jobId, {
       includeSegments: targetPage === 'translated-editor',
@@ -300,23 +322,17 @@ export default function App() {
 
   async function handleUpload(file: File) {
     setUploading(true)
-    setError('')
-    setPreviewSummary(null)
-    setDownloadUrl(null)
-    setPreviewOpen(false)
+    clearToast()
     setWarningsOpen(false)
     try {
       const nextJob = await uploadWorkbook(file)
       setJob(nextJob)
       setSegments([])
       setSegmentDrafts({})
-      setPreviewSummary(null)
-      setDownloadUrl(null)
-      setPreviewOpen(false)
       setWarningsOpen(false)
       await refreshJobs()
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : 'Upload failed.')
+      showToast(uploadError instanceof Error ? uploadError.message : 'Upload failed.')
     } finally {
       setUploading(false)
     }
@@ -324,21 +340,18 @@ export default function App() {
 
   async function handleStart() {
     if (!job) {
-      setError('Upload a document before starting.')
+      showToast('Upload a document before starting.')
       return
     }
     setStarting(true)
-    setError('')
-    setPreviewSummary(null)
-    setDownloadUrl(null)
-    setPreviewOpen(false)
+    clearToast()
     setWarningsOpen(false)
     try {
       const startedJob = await startJob(job.id, sourceLanguage, targetLanguage)
       syncJobState(startedJob)
       await refreshJobs()
     } catch (startError) {
-      setError(startError instanceof Error ? startError.message : 'Could not start job.')
+      showToast(startError instanceof Error ? startError.message : 'Could not start job.')
     } finally {
       setStarting(false)
     }
@@ -353,7 +366,7 @@ export default function App() {
       return
     }
     setDeletingJobId(jobId)
-    setError('')
+    clearToast()
     try {
       await deleteJob(jobId)
       if (job?.id === jobId) {
@@ -364,7 +377,7 @@ export default function App() {
       }
       await refreshJobs()
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : 'Could not delete job.')
+      showToast(deleteError instanceof Error ? deleteError.message : 'Could not delete job.')
     } finally {
       setDeletingJobId(null)
     }
@@ -375,7 +388,7 @@ export default function App() {
       return
     }
     setSavingSegmentId(segmentId)
-    setError('')
+    clearToast()
     try {
       const updatedSegment = await updateSegment(
         job.id,
@@ -397,46 +410,57 @@ export default function App() {
         searchQuery,
       })
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : 'Could not save segment.')
+      showToast(saveError instanceof Error ? saveError.message : 'Could not save segment.')
     } finally {
       setSavingSegmentId(null)
     }
   }
 
-  async function handlePreviewBuild() {
-    if (!job) {
-      return
-    }
-    setError('')
-    try {
-      const result = await previewJob(job.id)
-      setPreviewSummary(result.summary)
-      await reloadJob(job.id, {
-        includeSegments: route.page === 'translated-editor',
-        filterSheet,
-        searchQuery,
-      })
-      setPreviewOpen(true)
-    } catch (previewError) {
-      setError(previewError instanceof Error ? previewError.message : 'Preview failed.')
-    }
+  function triggerBrowserDownload(jobId: string) {
+    const link = document.createElement('a')
+    link.href = `/api/excel/jobs/${jobId}/download?ts=${Date.now()}`
+    link.rel = 'noreferrer'
+    document.body.append(link)
+    link.click()
+    link.remove()
   }
 
-  async function handlePrepareDownload() {
+  async function handleDownload() {
     if (!job) {
       return
     }
-    setError('')
+    clearToast()
     try {
       await prepareDownload(job.id)
-      setDownloadUrl(`/api/excel/jobs/${job.id}/download`)
+      triggerBrowserDownload(job.id)
       await reloadJob(job.id, {
         includeSegments: route.page === 'translated-editor',
         filterSheet,
         searchQuery,
       })
     } catch (downloadError) {
-      setError(downloadError instanceof Error ? downloadError.message : 'Download failed.')
+      showToast(downloadError instanceof Error ? downloadError.message : 'Download failed.')
+    }
+  }
+
+  async function handleRefreshDocumentPreview() {
+    if (!job || (job.file_type !== 'pdf' && job.file_type !== 'image')) {
+      return
+    }
+    setPreviewingDocument(true)
+    clearToast()
+    try {
+      await prepareDownload(job.id)
+      setDocumentPreviewVersion(Date.now())
+      await reloadJob(job.id, {
+        includeSegments: route.page === 'translated-editor',
+        filterSheet,
+        searchQuery,
+      })
+    } catch (previewError) {
+      showToast(previewError instanceof Error ? previewError.message : 'Could not refresh preview.')
+    } finally {
+      setPreviewingDocument(false)
     }
   }
 
@@ -448,7 +472,7 @@ export default function App() {
     try {
       await loadSegmentsForJob(job.id, nextFilterSheet, searchQuery)
     } catch (filterError) {
-      setError(filterError instanceof Error ? filterError.message : 'Could not filter segments.')
+      showToast(filterError instanceof Error ? filterError.message : 'Could not filter segments.')
     }
   }
 
@@ -460,7 +484,7 @@ export default function App() {
     try {
       await loadSegmentsForJob(job.id, filterSheet, nextSearchQuery)
     } catch (searchError) {
-      setError(searchError instanceof Error ? searchError.message : 'Could not search segments.')
+      showToast(searchError instanceof Error ? searchError.message : 'Could not search segments.')
     }
   }
 
@@ -479,12 +503,12 @@ export default function App() {
     translated_text: string
   }) {
     setKnowledgeBusyKey('glossary-save')
-    setError('')
+    clearToast()
     try {
       await saveGlossaryEntry(payload)
       await refreshKnowledge()
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : 'Could not save glossary entry.')
+      showToast(saveError instanceof Error ? saveError.message : 'Could not save glossary entry.')
     } finally {
       setKnowledgeBusyKey(null)
     }
@@ -492,12 +516,12 @@ export default function App() {
 
   async function handleDeleteGlossaryEntry(entryId: string) {
     setKnowledgeBusyKey(`glossary-delete:${entryId}`)
-    setError('')
+    clearToast()
     try {
       await deleteGlossaryEntry(entryId)
       await refreshKnowledge()
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : 'Could not delete glossary entry.')
+      showToast(deleteError instanceof Error ? deleteError.message : 'Could not delete glossary entry.')
     } finally {
       setKnowledgeBusyKey(null)
     }
@@ -505,12 +529,12 @@ export default function App() {
 
   async function handleSaveProtectedTerm(payload: { id?: string; term: string }) {
     setKnowledgeBusyKey('protected-save')
-    setError('')
+    clearToast()
     try {
       await saveProtectedTerm(payload)
       await refreshKnowledge()
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : 'Could not save protected term.')
+      showToast(saveError instanceof Error ? saveError.message : 'Could not save protected term.')
     } finally {
       setKnowledgeBusyKey(null)
     }
@@ -518,12 +542,12 @@ export default function App() {
 
   async function handleDeleteProtectedTerm(termId: string) {
     setKnowledgeBusyKey(`protected-delete:${termId}`)
-    setError('')
+    clearToast()
     try {
       await deleteProtectedTerm(termId)
       await refreshKnowledge()
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : 'Could not delete protected term.')
+      showToast(deleteError instanceof Error ? deleteError.message : 'Could not delete protected term.')
     } finally {
       setKnowledgeBusyKey(null)
     }
@@ -537,12 +561,12 @@ export default function App() {
     translated_text: string
   }) {
     setKnowledgeBusyKey('memory-save')
-    setError('')
+    clearToast()
     try {
       await saveTranslationMemoryEntry(payload)
       await refreshKnowledge()
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : 'Could not save translation memory entry.')
+      showToast(saveError instanceof Error ? saveError.message : 'Could not save translation memory entry.')
     } finally {
       setKnowledgeBusyKey(null)
     }
@@ -550,12 +574,12 @@ export default function App() {
 
   async function handleDeleteMemoryEntry(entryId: string) {
     setKnowledgeBusyKey(`memory-delete:${entryId}`)
-    setError('')
+    clearToast()
     try {
       await deleteTranslationMemoryEntry(entryId)
       await refreshKnowledge()
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : 'Could not delete translation memory entry.')
+      showToast(deleteError instanceof Error ? deleteError.message : 'Could not delete translation memory entry.')
     } finally {
       setKnowledgeBusyKey(null)
     }
@@ -571,7 +595,7 @@ export default function App() {
             <header className="topbar">
               <div>
                 <h1>Dashboard</h1>
-                <p>Track parsing, translation, review, preview, and download in one flow.</p>
+                <p>Track parsing, translation, review, and download in one flow.</p>
               </div>
               <input className="topbar-search" type="search" placeholder="Search files..." />
             </header>
@@ -678,7 +702,7 @@ export default function App() {
             <header className="topbar">
               <div>
                 <h1>Translated Files</h1>
-                <p>Open a saved document to review results, edits, preview, and download.</p>
+                <p>Open a saved document to review results, edit translations, and download.</p>
               </div>
             </header>
             <JobHistory
@@ -782,39 +806,30 @@ export default function App() {
                     <button
                       type="button"
                       className="primary-button"
-                      disabled={job.status !== 'review'}
+                      disabled={!['review', 'completed'].includes(job.status)}
                       onClick={() => {
-                        void handlePreviewBuild()
+                        void handleDownload()
                       }}
                     >
-                      Build preview
+                      Download current document
                     </button>
-                    <button
-                      type="button"
-                      className="icon-button"
-                      disabled={!previewSummary}
-                      aria-label="Open preview"
-                      onClick={() => setPreviewOpen(true)}
-                    >
-                      <PreviewIcon />
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      disabled={!job.preview_ready}
-                      onClick={() => {
-                        void handlePrepareDownload()
-                      }}
-                    >
-                      Prepare download
-                    </button>
-                    {downloadUrl ? (
-                      <a className="download-link" href={downloadUrl}>
-                        Download document
-                      </a>
-                    ) : null}
                   </div>
                 </section>
+                {job.file_type === 'pdf' || job.file_type === 'image' ? (
+                  <DocumentPreviewPanel
+                    fileType={job.file_type}
+                    sourceUrl={buildSourceDocumentPreviewUrl(job.id)}
+                    translatedUrl={
+                      job.output_file_name === null
+                        ? null
+                        : buildOutputDocumentPreviewUrl(job.id, documentPreviewVersion)
+                    }
+                    isOutputStale={job.status === 'review' && job.output_file_name !== null}
+                    refreshDisabled={!['review', 'completed'].includes(job.status) || previewingDocument}
+                    refreshing={previewingDocument}
+                    onRefresh={handleRefreshDocumentPreview}
+                  />
+                ) : null}
               </>
             ) : (
               <section className="panel">
@@ -887,44 +902,22 @@ export default function App() {
                       <strong>{String(segments.filter((segment) => segment.status === 'edited').length)}</strong>
                     </div>
                   </div>
-
-                  <div className="action-row">
-                    <button
-                      type="button"
-                      className="primary-button"
-                      disabled={job.status !== 'review'}
-                      onClick={() => {
-                        void handlePreviewBuild()
-                      }}
-                    >
-                      Build preview
-                    </button>
-                    <button
-                      type="button"
-                      className="icon-button"
-                      disabled={!previewSummary}
-                      aria-label="Open preview"
-                      onClick={() => setPreviewOpen(true)}
-                    >
-                      <PreviewIcon />
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      disabled={!job.preview_ready}
-                      onClick={() => {
-                        void handlePrepareDownload()
-                      }}
-                    >
-                      Prepare download
-                    </button>
-                    {downloadUrl ? (
-                      <a className="download-link" href={downloadUrl}>
-                        Download document
-                      </a>
-                    ) : null}
-                  </div>
                 </section>
+                {job.file_type === 'pdf' || job.file_type === 'image' ? (
+                  <DocumentPreviewPanel
+                    fileType={job.file_type}
+                    sourceUrl={buildSourceDocumentPreviewUrl(job.id)}
+                    translatedUrl={
+                      job.output_file_name === null
+                        ? null
+                        : buildOutputDocumentPreviewUrl(job.id, documentPreviewVersion)
+                    }
+                    isOutputStale={job.status === 'review' && job.output_file_name !== null}
+                    refreshDisabled={!['review', 'completed'].includes(job.status) || previewingDocument}
+                    refreshing={previewingDocument}
+                    onRefresh={handleRefreshDocumentPreview}
+                  />
+                ) : null}
 
                 <TranslationEditor
                   fileType={job.file_type}
@@ -947,6 +940,24 @@ export default function App() {
                   }}
                   onSaveSegment={handleSaveSegment}
                 />
+                <section className="panel editor-footer-panel">
+                  <div className="action-row editor-footer-actions">
+                    <button
+                      type="button"
+                      className="primary-button"
+                      disabled={!['review', 'completed'].includes(job.status)}
+                      onClick={() => {
+                        void handleDownload()
+                      }}
+                    >
+                      Download edited document
+                    </button>
+                  </div>
+                  <p className="hint">
+                    Download will export the current edits directly. If export fails, fix the
+                    flagged text and try again.
+                  </p>
+                </section>
               </>
             ) : (
               <section className="panel">
@@ -979,15 +990,6 @@ export default function App() {
         ) : null}
 
         <Modal
-          title={job ? `Preview · ${job.original_file_name}` : 'Preview'}
-          open={previewOpen && previewSummary !== null}
-          onClose={() => setPreviewOpen(false)}
-        >
-          {previewSummary?.kind === 'xlsx' ? <SpreadsheetPreview preview={previewSummary} /> : null}
-          {previewSummary?.kind === 'pptx' ? <PresentationPreview preview={previewSummary} /> : null}
-        </Modal>
-
-        <Modal
           title={job ? `Warnings · ${job.original_file_name}` : 'Warnings'}
           open={
             warningsOpen &&
@@ -1012,8 +1014,13 @@ export default function App() {
             </div>
           </section>
         </Modal>
-
-        {error ? <p className="error-banner">{error}</p> : null}
+        {toast ? (
+          <NotificationToast
+            message={toast.message}
+            tone={toast.tone}
+            onDismiss={clearToast}
+          />
+        ) : null}
       </section>
     </main>
   )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -146,6 +147,46 @@ class KnowledgeApiTests(unittest.TestCase):
                 )
                 self.assertEqual(second_response.status_code, 200)
                 self.assertEqual(second_response.json()["translated_text"], "Audit nội bộ")
+
+    def test_save_memory_entry_creates_bidirectional_translation_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            config = AppConfig(
+                root_dir=PROJECT_ROOT,
+                models_dir=temp_path / "models",
+                workspace_dir=temp_path / "workspace",
+                database_path=temp_path / "workspace" / "app.db",
+            )
+            app = create_app(
+                config=config,
+                translation_service=FakeTranslationService(),
+            )
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/knowledge/memory",
+                    json={
+                        "source_language": "ja",
+                        "target_language": "vi",
+                        "source_text": "受注管理",
+                        "translated_text": "Quan ly don hang",
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+
+                connection = sqlite3.connect(config.database_path)
+                try:
+                    rows = connection.execute(
+                        """
+                        SELECT source_language, target_language, source_text, translated_text
+                        FROM translation_memory
+                        ORDER BY source_language, target_language, source_text
+                        """
+                    ).fetchall()
+                finally:
+                    connection.close()
+
+                self.assertIn(("ja", "vi", "受注管理", "Quan ly don hang"), rows)
+                self.assertIn(("vi", "ja", "Quan ly don hang", "受注管理"), rows)
 
 
 if __name__ == "__main__":

@@ -377,11 +377,20 @@ class ExcelOOXMLTests(unittest.TestCase):
         self.assertIn("'Điều kiện tiền đề'!$A$1".encode("utf-8"), workbook_xml)
         self.assertIn("'Điều kiện tiền đề'!A1".encode("utf-8"), sheet_two_xml)
 
-    def test_build_sheet_name_updates_rejects_duplicate_translations(self) -> None:
-        with self.assertRaisesRegex(ExcelOOXMLError, "duplicated"):
+    def test_build_sheet_name_updates_truncates_and_deduplicates_translations(self) -> None:
+        updates = build_sheet_name_updates(
+            original_sheet_names=["前提条件", "集計"],
+            translated_sheet_names=["A" * 40, "A" * 40],
+        )
+
+        self.assertEqual(updates["前提条件"], "A" * 31)
+        self.assertEqual(updates["集計"], f"{'A' * 27} (2)")
+
+    def test_build_sheet_name_updates_rejects_empty_names_after_normalization(self) -> None:
+        with self.assertRaisesRegex(ExcelOOXMLError, "empty"):
             build_sheet_name_updates(
-                original_sheet_names=["前提条件", "集計"],
-                translated_sheet_names=["Tổng hợp", "Tổng hợp"],
+                original_sheet_names=["前提条件"],
+                translated_sheet_names=["[]:*?/\\\\   "],
             )
 
     def test_list_workbook_sheet_names_returns_all_sheets(self) -> None:

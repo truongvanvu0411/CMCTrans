@@ -33,6 +33,7 @@ SAFE_SHEET_FORMULA_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
 R1C1_REF_RE = re.compile(r"^[Rr]\d+[Cc]\d+$")
 EMU_PER_PIXEL = 9525
 EXCEL_EPOCH = datetime(1899, 12, 30)
+MAX_EXCEL_SHEET_NAME_LENGTH = 31
 BUILT_IN_NUMBER_FORMATS: dict[int, str] = {
     0: "General",
     1: "0",
@@ -206,25 +207,39 @@ def build_sheet_name_updates(
         translated_sheet_names,
         strict=True,
     ):
-        normalized_name = translated_name.strip()
+        normalized_name = _sanitize_sheet_name_candidate(translated_name)
         if not normalized_name:
             raise ExcelOOXMLError(f"Translated sheet name for '{original_name}' is empty.")
-        if INVALID_SHEET_NAME_CHARS_RE.search(normalized_name):
-            raise ExcelOOXMLError(
-                f"Translated sheet name '{normalized_name}' contains invalid Excel characters."
-            )
-        if len(normalized_name) > 31:
-            raise ExcelOOXMLError(
-                f"Translated sheet name '{normalized_name}' exceeds Excel's 31-character limit."
-            )
+        updates[original_name] = _allocate_sheet_name(
+            candidate_name=normalized_name,
+            seen_names=seen_names,
+        )
+    return updates
+
+
+def _sanitize_sheet_name_candidate(sheet_name: str) -> str:
+    sanitized_name = INVALID_SHEET_NAME_CHARS_RE.sub(" ", sheet_name).strip()
+    return " ".join(sanitized_name.split())
+
+
+def _allocate_sheet_name(*, candidate_name: str, seen_names: set[str]) -> str:
+    if not candidate_name:
+        raise ExcelOOXMLError("Translated sheet name is empty after normalization.")
+    for duplicate_index in range(1, len(seen_names) + 2):
+        suffix = "" if duplicate_index == 1 else f" ({duplicate_index})"
+        max_base_length = MAX_EXCEL_SHEET_NAME_LENGTH - len(suffix)
+        if max_base_length <= 0:
+            raise ExcelOOXMLError("Could not allocate a valid Excel sheet name suffix.")
+        base_name = candidate_name[:max_base_length].rstrip()
+        normalized_name = f"{base_name}{suffix}".strip()
+        if not normalized_name:
+            raise ExcelOOXMLError("Translated sheet name is empty after normalization.")
         lowered_name = normalized_name.casefold()
         if lowered_name in seen_names:
-            raise ExcelOOXMLError(
-                f"Translated sheet name '{normalized_name}' is duplicated in the workbook."
-            )
+            continue
         seen_names.add(lowered_name)
-        updates[original_name] = normalized_name
-    return updates
+        return normalized_name
+    raise ExcelOOXMLError("Could not allocate a unique translated sheet name.")
 
 
 def _column_to_number(column_letters: str) -> int:

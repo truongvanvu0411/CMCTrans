@@ -8,7 +8,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import PurePosixPath
-from typing import Callable
+from typing import Callable, Iterable
 
 from lxml import etree
 
@@ -20,6 +20,7 @@ OOXML_NS = {
     "xml": "http://www.w3.org/XML/1998/namespace",
     "xdr": "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing",
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
 }
 REL_TYPE_WORKSHEET = (
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
@@ -27,10 +28,12 @@ REL_TYPE_WORKSHEET = (
 REL_TYPE_DRAWING = (
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"
 )
+REL_TYPE_CHART = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
 CELL_REF_RE = re.compile(r"^([A-Z]+)(\d+)$")
 INVALID_SHEET_NAME_CHARS_RE = re.compile(r"[:\\/?*\[\]]")
 SAFE_SHEET_FORMULA_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
 R1C1_REF_RE = re.compile(r"^[Rr]\d+[Cc]\d+$")
+NUMERIC_ONLY_RE = re.compile(r"^[\d\s.,%+\-()/]+$")
 EMU_PER_PIXEL = 9525
 EXCEL_EPOCH = datetime(1899, 12, 30)
 MAX_EXCEL_SHEET_NAME_LENGTH = 31
@@ -70,6 +73,7 @@ class ExtractedSegment:
     sheet_name: str
     sheet_index: int
     cell_address: str
+    location_type: str
     original_text: str
     normalized_text: str
     warning_codes: list[str]
@@ -277,6 +281,259 @@ def _collect_merged_cells(sheet_root: etree._Element) -> tuple[set[str], set[str
     return owner_cells, covered_cells
 
 
+def _normalize_extracted_text(text: str) -> str:
+    return text.strip()
+
+
+def _drawing_anchors(drawing_root: etree._Element) -> list[etree._Element]:
+    anchors: list[etree._Element] = []
+    for child in list(drawing_root):
+        local_name = etree.QName(child.tag).localname
+        if local_name in {"twoCellAnchor", "oneCellAnchor"}:
+            anchors.append(child)
+    return anchors
+
+
+def _drawing_object_name(element: etree._Element, *, default_name: str) -> str:
+    non_visual_properties = element.find(".//xdr:cNvPr", OOXML_NS)
+    if non_visual_properties is None:
+        return default_name
+    object_name = non_visual_properties.attrib.get("name")
+    if object_name is None:
+        return default_name
+    normalized_name = object_name.strip()
+    return normalized_name or default_name
+
+
+def _drawing_object_identifier(element: etree._Element) -> str | None:
+    non_visual_properties = element.find(".//xdr:cNvPr", OOXML_NS)
+    if non_visual_properties is None:
+        return None
+    object_id = non_visual_properties.attrib.get("id")
+    if object_id is None:
+        return None
+    normalized_id = object_id.strip()
+    return normalized_id or None
+
+
+def _iter_drawing_objects(root: etree._Element) -> Iterable[tuple[str, etree._Element]]:
+    for child in list(root):
+        local_name = etree.QName(child.tag).localname
+        if local_name == "sp":
+            yield ("shape", child)
+            continue
+        if local_name == "graphicFrame":
+            yield ("graphic_frame", child)
+            continue
+        if local_name == "pic":
+            yield ("picture", child)
+            continue
+        if local_name == "grpSp":
+            yield from _iter_drawing_objects(child)
+            continue
+        if local_name in {
+            "nvGrpSpPr",
+            "grpSpPr",
+            "txSp",
+            "cxnSp",
+            "contentPart",
+            "clientData",
+            "from",
+            "to",
+            "ext",
+        }:
+            continue
+        yield ("unsupported", child)
+
+
+def _patchable_chart_text_nodes(root: etree._Element) -> list[etree._Element]:
+    nodes: list[etree._Element] = []
+    seen_paths: set[str] = set()
+    tree = root.getroottree()
+    for xpath in (
+        ".//c:title//a:t",
+        ".//c:tx//a:t",
+        ".//c:cat//c:strRef//c:pt//c:v",
+        ".//c:cat//c:multiLvlStrRef//c:pt//c:v",
+        ".//c:tx//c:v",
+        ".//c:txPr//a:t",
+        ".//c:dLbls//a:t",
+        ".//c:legend//a:t",
+    ):
+        for node in root.findall(xpath, OOXML_NS):
+            node_path = tree.getpath(node)
+            if node_path in seen_paths:
+                continue
+            seen_paths.add(node_path)
+            nodes.append(node)
+    return nodes
+
+
+def _extract_chart_segments(
+    *,
+    chart_root: etree._Element,
+    chart_path: str,
+    sheet_name: str,
+    sheet_index: int,
+    chart_label: str,
+) -> list[ExtractedSegment]:
+    segments: list[ExtractedSegment] = []
+    xpath_specs = [
+        (".//c:title//a:t", "chart_title", False),
+        (".//c:tx//a:t", "chart_text", False),
+        (".//c:cat//c:strRef//c:pt//c:v", "chart_category", True),
+        (".//c:cat//c:multiLvlStrRef//c:pt//c:v", "chart_category", True),
+        (".//c:tx//c:v", "chart_series", True),
+        (".//c:legend//a:t", "chart_legend", False),
+        (".//c:dLbls//a:t", "chart_label", False),
+        (".//c:txPr//a:t", "chart_text", False),
+    ]
+    seen_nodes: set[str] = set()
+    tree = chart_root.getroottree()
+    node_index = 0
+    for xpath, object_type, skip_numeric in xpath_specs:
+        for node in chart_root.findall(xpath, OOXML_NS):
+            text_value = _collect_text(node)
+            normalized_text = _normalize_extracted_text(text_value)
+            if not normalized_text:
+                continue
+            if skip_numeric and NUMERIC_ONLY_RE.fullmatch(normalized_text):
+                continue
+            node_path = tree.getpath(node)
+            if node_path in seen_nodes:
+                continue
+            seen_nodes.add(node_path)
+            segments.append(
+                ExtractedSegment(
+                    sheet_name=sheet_name,
+                    sheet_index=sheet_index,
+                    cell_address=f"{chart_label} - text {node_index + 1}",
+                    location_type=object_type,
+                    original_text=text_value,
+                    normalized_text=normalized_text,
+                    warning_codes=["chart_text"],
+                    locator={
+                        "package_part": chart_path,
+                        "object_type": object_type,
+                        "object_label": chart_label,
+                        "node_index": str(node_index),
+                    },
+                )
+            )
+            node_index += 1
+    return segments
+
+
+def _extract_drawing_segments(
+    archive: zipfile.ZipFile,
+    *,
+    sheet_name: str,
+    sheet_index: int,
+    sheet_path: str,
+    sheet_root: etree._Element,
+) -> tuple[list[ExtractedSegment], int, list[str]]:
+    drawing = sheet_root.find("main:drawing", OOXML_NS)
+    if drawing is None:
+        return [], 0, []
+    relationship_id = drawing.attrib.get(f"{{{OOXML_NS['rel']}}}id")
+    if relationship_id is None:
+        return [], 1, [f"{sheet_name}: drawing relationship is incomplete."]
+    sheet_rels_path = _build_relationships_path(sheet_path)
+    relationship_targets = _extract_part_relationships(archive, sheet_rels_path)
+    drawing_target = relationship_targets.get(relationship_id)
+    if drawing_target is None:
+        return [], 1, [f"{sheet_name}: drawing target is missing."]
+    drawing_path = _build_path(sheet_path, drawing_target)
+    if drawing_path not in archive.namelist():
+        return [], 1, [f"{sheet_name}: drawing part is missing."]
+    drawing_root = _parse_xml(archive.read(drawing_path))
+    drawing_rels_path = _build_relationships_path(drawing_path)
+    drawing_relationships = _extract_part_relationships(archive, drawing_rels_path)
+
+    segments: list[ExtractedSegment] = []
+    unsupported_object_count = 0
+    warnings: list[str] = []
+    chart_counter = 0
+    shape_counter = 0
+    anchors = _drawing_anchors(drawing_root)
+    for anchor in anchors:
+        for object_kind, element in _iter_drawing_objects(anchor):
+            if object_kind == "picture":
+                unsupported_object_count += 1
+                continue
+            if object_kind == "shape":
+                shape_counter += 1
+                shape_label = _drawing_object_name(element, default_name=f"Shape {shape_counter}")
+                shape_id = _drawing_object_identifier(element)
+                for paragraph_index, paragraph in enumerate(element.findall("xdr:txBody/a:p", OOXML_NS)):
+                    text_value = "".join(
+                        _collect_text(text_node) for text_node in paragraph.findall(".//a:t", OOXML_NS)
+                    )
+                    normalized_text = _normalize_extracted_text(text_value)
+                    if not normalized_text:
+                        continue
+                    locator = {
+                        "package_part": drawing_path,
+                        "object_type": "shape_text",
+                        "object_label": shape_label,
+                        "paragraph_index": str(paragraph_index),
+                    }
+                    if shape_id is not None:
+                        locator["shape_id"] = shape_id
+                    segments.append(
+                        ExtractedSegment(
+                            sheet_name=sheet_name,
+                            sheet_index=sheet_index,
+                            cell_address=f"{shape_label} - paragraph {paragraph_index + 1}",
+                            location_type="shape_text",
+                            original_text=text_value,
+                            normalized_text=normalized_text,
+                            warning_codes=[],
+                            locator=locator,
+                        )
+                    )
+                continue
+            if object_kind == "graphic_frame":
+                chart_node = element.find(".//c:chart", OOXML_NS)
+                if chart_node is None:
+                    unsupported_object_count += 1
+                    continue
+                chart_relationship_id = chart_node.attrib.get(f"{{{OOXML_NS['rel']}}}id")
+                if chart_relationship_id is None:
+                    unsupported_object_count += 1
+                    continue
+                chart_target = drawing_relationships.get(chart_relationship_id)
+                if chart_target is None:
+                    unsupported_object_count += 1
+                    continue
+                chart_path = _build_path(drawing_path, chart_target)
+                if chart_path not in archive.namelist():
+                    unsupported_object_count += 1
+                    continue
+                chart_counter += 1
+                chart_label = _drawing_object_name(
+                    element,
+                    default_name=f"Chart {chart_counter}",
+                )
+                chart_root = _parse_xml(archive.read(chart_path))
+                segments.extend(
+                    _extract_chart_segments(
+                        chart_root=chart_root,
+                        chart_path=chart_path,
+                        sheet_name=sheet_name,
+                        sheet_index=sheet_index,
+                        chart_label=chart_label,
+                    )
+                )
+                continue
+            unsupported_object_count += 1
+    if unsupported_object_count:
+        warnings.append(
+            f"{sheet_name}: {unsupported_object_count} drawing objects detected but not extracted."
+        )
+    return segments, unsupported_object_count, warnings
+
+
 def parse_workbook(
     file_bytes: bytes,
     *,
@@ -290,14 +547,29 @@ def parse_workbook(
     with archive:
         sheet_paths = _extract_sheet_paths(archive)
         shared_strings, rich_shared_indexes = _extract_shared_strings(archive)
-        sheet_roots = [
-            (sheet_name, sheet_path, _parse_xml(archive.read(sheet_path)))
-            for sheet_name, sheet_path in sheet_paths
-        ]
-        total_cells_in_workbook = sum(
-            len(sheet_root.findall(".//main:sheetData/main:row/main:c", OOXML_NS))
-            for _, _, sheet_root in sheet_roots
-        )
+        sheet_roots = []
+        total_cells_in_workbook = 0
+        for sheet_index, (sheet_name, sheet_path) in enumerate(sheet_paths):
+            sheet_root = _parse_xml(archive.read(sheet_path))
+            drawing_segments, unsupported_drawing_objects, drawing_warnings = _extract_drawing_segments(
+                archive,
+                sheet_name=sheet_name,
+                sheet_index=sheet_index,
+                sheet_path=sheet_path,
+                sheet_root=sheet_root,
+            )
+            worksheet_cells = sheet_root.findall(".//main:sheetData/main:row/main:c", OOXML_NS)
+            total_cells_in_workbook += len(worksheet_cells) + len(drawing_segments)
+            sheet_roots.append(
+                (
+                    sheet_name,
+                    sheet_path,
+                    sheet_root,
+                    drawing_segments,
+                    unsupported_drawing_objects,
+                    drawing_warnings,
+                )
+            )
         extracted_segments: list[ExtractedSegment] = []
         skipped_formula_cells = 0
         skipped_whitespace_cells = 0
@@ -309,11 +581,17 @@ def parse_workbook(
         warnings: list[str] = []
 
         scanned_cells = 0
-        for sheet_index, (sheet_name, sheet_path, sheet_root) in enumerate(sheet_roots):
+        for sheet_index, (
+            sheet_name,
+            sheet_path,
+            sheet_root,
+            drawing_segments,
+            unsupported_drawing_objects,
+            drawing_warnings,
+        ) in enumerate(sheet_roots):
             merged_owner_cells, merged_covered_cells = _collect_merged_cells(sheet_root)
-            if sheet_root.find("main:drawing", OOXML_NS) is not None:
-                unsupported_object_count += 1
-                warnings.append(f"{sheet_name}: drawing objects detected but not extracted.")
+            unsupported_object_count += unsupported_drawing_objects
+            warnings.extend(drawing_warnings)
 
             for cell in sheet_root.findall(".//main:sheetData/main:row/main:c", OOXML_NS):
                 total_scanned_cells += 1
@@ -386,6 +664,7 @@ def parse_workbook(
                         sheet_name=sheet_name,
                         sheet_index=sheet_index,
                         cell_address=cell_ref,
+                        location_type="worksheet_cell",
                         original_text=text_value,
                         normalized_text=normalized_text,
                         warning_codes=warning_codes,
@@ -396,6 +675,20 @@ def parse_workbook(
                         },
                     )
                 )
+
+            for segment in drawing_segments:
+                total_scanned_cells += 1
+                scanned_cells += 1
+                if progress_callback is not None:
+                    progress_callback(
+                        ParseProgress(
+                            scanned_cells=scanned_cells,
+                            total_cells=total_cells_in_workbook,
+                            current_sheet=sheet_name,
+                            current_cell=segment.cell_address,
+                        )
+                    )
+                extracted_segments.append(segment)
 
         parse_summary = {
             "total_sheets": len(sheet_paths),
@@ -1048,7 +1341,7 @@ def _extract_preview_drawings(
     drawing_rels_path = _build_relationships_path(drawing_path)
     drawing_relationships = _extract_part_relationships(archive, drawing_rels_path)
     drawing_items: list[dict[str, object]] = []
-    for anchor in drawing_root.findall("xdr:twoCellAnchor", OOXML_NS) + drawing_root.findall("xdr:oneCellAnchor", OOXML_NS):
+    for anchor in _drawing_anchors(drawing_root):
         anchor_data = _extract_anchor_bounds(anchor, visible_max_row=visible_max_row, visible_max_column=visible_max_column)
         if anchor_data is None:
             continue
@@ -1191,9 +1484,9 @@ def export_workbook(
     except zipfile.BadZipFile as exc:
         raise ExcelOOXMLError("Original workbook is not a valid OOXML package.") from exc
 
-    updates_by_part: dict[str, dict[str, str]] = {}
+    updates_by_part: dict[str, list[tuple[dict[str, str], str]]] = {}
     for locator, final_text in segment_updates:
-        updates_by_part.setdefault(locator["package_part"], {})[locator["cell_ref"]] = final_text
+        updates_by_part.setdefault(locator["package_part"], []).append((locator, final_text))
 
     worksheet_paths = {
         sheet_path
@@ -1206,9 +1499,31 @@ def export_workbook(
             if entry_name in worksheet_paths:
                 data = _patch_worksheet_xml(
                     data,
-                    cell_updates=updates_by_part.get(entry_name, {}),
+                    updates=updates_by_part.get(entry_name, []),
                     sheet_name_updates=sheet_name_updates,
                 )
+            elif entry_name in updates_by_part:
+                object_types = {
+                    locator.get("object_type", "")
+                    for locator, _ in updates_by_part[entry_name]
+                }
+                if object_types == {"shape_text"}:
+                    data = _patch_drawing_xml(data, updates=updates_by_part[entry_name])
+                elif object_types.issubset(
+                    {
+                        "chart_title",
+                        "chart_text",
+                        "chart_category",
+                        "chart_series",
+                        "chart_legend",
+                        "chart_label",
+                    }
+                ):
+                    data = _patch_chart_xml(data, updates=updates_by_part[entry_name])
+                else:
+                    raise ExcelOOXMLError(
+                        f"Unsupported workbook object update types in {entry_name}: {sorted(object_types)}."
+                    )
             elif entry_name == "xl/workbook.xml" and sheet_name_updates:
                 data = _patch_workbook_xml(data, sheet_name_updates)
             output_archive.writestr(entry_name, data)
@@ -1221,9 +1536,14 @@ def export_workbook(
 def _patch_worksheet_xml(
     sheet_xml: bytes,
     *,
-    cell_updates: dict[str, str],
+    updates: list[tuple[dict[str, str], str]],
     sheet_name_updates: dict[str, str] | None,
 ) -> bytes:
+    cell_updates = {
+        locator["cell_ref"]: final_text
+        for locator, final_text in updates
+        if "cell_ref" in locator
+    }
     sheet_root = _parse_xml(sheet_xml)
     updated_refs: set[str] = set()
     if sheet_name_updates:
@@ -1255,6 +1575,112 @@ def _patch_worksheet_xml(
         encoding="utf-8",
         xml_declaration=True,
     )
+
+
+def _clone_drawing_run_props(paragraph: etree._Element) -> etree._Element:
+    for run in paragraph.findall("a:r", OOXML_NS):
+        run_props = run.find("a:rPr", OOXML_NS)
+        if run_props is not None:
+            return etree.fromstring(etree.tostring(run_props))
+    end_props = paragraph.find("a:endParaRPr", OOXML_NS)
+    if end_props is not None:
+        cloned = etree.Element(_qualified("a", "rPr"))
+        for key, value in end_props.attrib.items():
+            cloned.attrib[key] = value
+        for child in list(end_props):
+            cloned.append(etree.fromstring(etree.tostring(child)))
+        return cloned
+    return etree.Element(_qualified("a", "rPr"))
+
+
+def _append_drawing_text_runs(
+    paragraph: etree._Element,
+    *,
+    final_text: str,
+    template_run_props: etree._Element,
+) -> None:
+    lines = final_text.splitlines() or [final_text]
+    for line_index, line_text in enumerate(lines):
+        run = etree.SubElement(paragraph, _qualified("a", "r"))
+        run.append(etree.fromstring(etree.tostring(template_run_props)))
+        text_node = etree.SubElement(run, _qualified("a", "t"))
+        if line_text != line_text.strip():
+            text_node.attrib[_qualified("xml", "space")] = "preserve"
+        text_node.text = line_text
+        if line_index < len(lines) - 1:
+            etree.SubElement(paragraph, _qualified("a", "br"))
+
+
+def _replace_drawing_paragraph_text(paragraph: etree._Element, final_text: str) -> None:
+    template_run_props = _clone_drawing_run_props(paragraph)
+    end_paragraph_props = paragraph.find("a:endParaRPr", OOXML_NS)
+    detached_end_paragraph_props: etree._Element | None = None
+    if end_paragraph_props is not None:
+        detached_end_paragraph_props = etree.fromstring(etree.tostring(end_paragraph_props))
+        paragraph.remove(end_paragraph_props)
+    for child in list(paragraph):
+        if etree.QName(child.tag).localname in {"r", "br", "fld"}:
+            paragraph.remove(child)
+    _append_drawing_text_runs(
+        paragraph,
+        final_text=final_text,
+        template_run_props=template_run_props,
+    )
+    if detached_end_paragraph_props is not None:
+        paragraph.append(detached_end_paragraph_props)
+
+
+def _patch_drawing_xml(
+    drawing_xml: bytes,
+    *,
+    updates: list[tuple[dict[str, str], str]],
+) -> bytes:
+    drawing_root = _parse_xml(drawing_xml)
+    consumed_indexes: set[int] = set()
+    shapes = drawing_root.findall(".//xdr:sp", OOXML_NS)
+    for update_index, (locator, final_text) in enumerate(updates):
+        if locator.get("object_type") != "shape_text":
+            raise ExcelOOXMLError("Drawing export received a non-shape update.")
+        shape_id = locator.get("shape_id")
+        object_label = locator.get("object_label", "")
+        paragraph_index = int(locator.get("paragraph_index", "-1"))
+        matched_shape: etree._Element | None = None
+        for shape in shapes:
+            if shape_id is not None and _drawing_object_identifier(shape) == shape_id:
+                matched_shape = shape
+                break
+            if _drawing_object_name(shape, default_name="") == object_label:
+                matched_shape = shape
+                break
+        if matched_shape is None:
+            raise ExcelOOXMLError("Could not locate drawing shape during workbook export.")
+        paragraphs = matched_shape.findall("xdr:txBody/a:p", OOXML_NS)
+        if paragraph_index < 0 or paragraph_index >= len(paragraphs):
+            raise ExcelOOXMLError("Drawing paragraph index is out of range during workbook export.")
+        _replace_drawing_paragraph_text(paragraphs[paragraph_index], final_text)
+        consumed_indexes.add(update_index)
+    if len(consumed_indexes) != len(updates):
+        raise ExcelOOXMLError("Not all drawing updates were consumed during workbook export.")
+    return etree.tostring(drawing_root, encoding="utf-8", xml_declaration=True)
+
+
+def _patch_chart_xml(
+    chart_xml: bytes,
+    *,
+    updates: list[tuple[dict[str, str], str]],
+) -> bytes:
+    chart_root = _parse_xml(chart_xml)
+    text_nodes = _patchable_chart_text_nodes(chart_root)
+    consumed_indexes: set[int] = set()
+    for update_index, (locator, final_text) in enumerate(updates):
+        node_index = int(locator.get("node_index", "-1"))
+        if node_index < 0 or node_index >= len(text_nodes):
+            raise ExcelOOXMLError("Could not locate chart text node during workbook export.")
+        text_nodes[node_index].text = final_text
+        consumed_indexes.add(update_index)
+    if len(consumed_indexes) != len(updates):
+        raise ExcelOOXMLError("Not all chart updates were consumed during workbook export.")
+    return etree.tostring(chart_root, encoding="utf-8", xml_declaration=True)
 
 
 def _patch_workbook_xml(workbook_xml: bytes, sheet_name_updates: dict[str, str]) -> bytes:

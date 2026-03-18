@@ -124,7 +124,7 @@ def _segment_location_type(
         return segment.location_type
     if isinstance(segment, ExtractedOcrSegment):
         return segment.location_type
-    return "worksheet_cell"
+    return segment.location_type
 
 
 def _segment_group_name(

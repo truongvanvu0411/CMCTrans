@@ -22,6 +22,7 @@ from backend.tests.fakes import (
 )
 from backend.tests.test_docx_ooxml import build_test_docx
 from backend.tests.test_excel_ooxml import build_symbol_workbook, build_test_workbook
+from backend.tests.test_excel_ooxml import build_drawing_chart_workbook
 from backend.tests.test_ocr_document import (
     _resolve_test_font_path,
     build_test_ocr_image,
@@ -48,6 +49,76 @@ class BrokenOcrService:
 
 
 class ExcelApiTests(unittest.TestCase):
+    def test_upload_start_and_download_xlsx_job_extracts_shape_and_chart_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            config = AppConfig(
+                root_dir=PROJECT_ROOT,
+                models_dir=temp_path / "models",
+                workspace_dir=temp_path / "workspace",
+                database_path=temp_path / "workspace" / "app.db",
+            )
+            app = create_app(
+                config=config,
+                translation_service=FakeTranslationService(),
+            )
+            with TestClient(app) as client:
+                authenticate_client(client)
+                upload_response = client.post(
+                    "/api/excel/jobs/upload",
+                    params={"file_name": "drawing.xlsx"},
+                    content=build_drawing_chart_workbook(),
+                    headers={
+                        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    },
+                )
+                self.assertEqual(upload_response.status_code, 200)
+                job_id = upload_response.json()["id"]
+
+                start_response = client.post(
+                    f"/api/excel/jobs/{job_id}/start",
+                    json={"source_language": "en", "target_language": "vi"},
+                )
+                self.assertEqual(start_response.status_code, 200)
+
+                for _ in range(20):
+                    job_state = client.get(f"/api/excel/jobs/{job_id}").json()
+                    if job_state["status"] == "review":
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise AssertionError("Drawing workbook job did not reach review state in time.")
+
+                segments_response = client.get(f"/api/excel/jobs/{job_id}/segments")
+                self.assertEqual(segments_response.status_code, 200)
+                segments = segments_response.json()["items"]
+                location_types = {segment["location_type"] for segment in segments}
+                self.assertIn("shape_text", location_types)
+                self.assertIn("chart_title", location_types)
+                self.assertIn("chart_series", location_types)
+                self.assertIn("chart_category", location_types)
+                self.assertEqual(len(segments), 8)
+                self.assertTrue(
+                    any(
+                        segment["cell_address"] == "Grouped Box - paragraph 1"
+                        for segment in segments
+                    )
+                )
+
+                prepare_download_response = client.post(f"/api/excel/jobs/{job_id}/download")
+                self.assertEqual(prepare_download_response.status_code, 200)
+                self.assertEqual(
+                    prepare_download_response.json()["file_name"],
+                    "drawing.vi.xlsx",
+                )
+
+                download_response = client.get(f"/api/excel/jobs/{job_id}/download")
+                self.assertEqual(download_response.status_code, 200)
+                exported_workbook = parse_workbook(download_response.content)
+                exported_location_types = {segment.location_type for segment in exported_workbook.segments}
+                self.assertIn("shape_text", exported_location_types)
+                self.assertIn("chart_title", exported_location_types)
+
     def test_upload_start_and_download_xls_job_uses_legacy_excel_converter(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

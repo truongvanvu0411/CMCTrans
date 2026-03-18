@@ -229,6 +229,153 @@ def build_formula_rename_workbook() -> bytes:
     return buffer.getvalue()
 
 
+def build_drawing_chart_workbook() -> bytes:
+    workbook_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>
+"""
+    workbook_rels_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1"
+    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
+    Target="worksheets/sheet1.xml"/>
+</Relationships>
+"""
+    sheet_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is><t>見積書</t></is></c>
+    </row>
+  </sheetData>
+  <drawing r:id="rIdDrawing1"/>
+</worksheet>
+"""
+    sheet_rels_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdDrawing1"
+    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"
+    Target="../drawings/drawing1.xml"/>
+</Relationships>
+"""
+    drawing_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+ xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+ xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <xdr:oneCellAnchor>
+    <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:ext cx="1905000" cy="952500"/>
+    <xdr:sp>
+      <xdr:nvSpPr><xdr:cNvPr id="2" name="Callout Box"/><xdr:cNvSpPr/></xdr:nvSpPr>
+      <xdr:spPr/>
+      <xdr:txBody>
+        <a:bodyPr/>
+        <a:lstStyle/>
+        <a:p><a:r><a:t>Shape note</a:t></a:r></a:p>
+      </xdr:txBody>
+    </xdr:sp>
+    <xdr:clientData/>
+  </xdr:oneCellAnchor>
+  <xdr:oneCellAnchor>
+    <xdr:from><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:ext cx="1905000" cy="952500"/>
+    <xdr:grpSp>
+      <xdr:nvGrpSpPr>
+        <xdr:cNvPr id="20" name="Grouped Root"/>
+        <xdr:cNvGrpSpPr/>
+      </xdr:nvGrpSpPr>
+      <xdr:grpSpPr/>
+      <xdr:sp>
+        <xdr:nvSpPr><xdr:cNvPr id="21" name="Grouped Box"/><xdr:cNvSpPr/></xdr:nvSpPr>
+        <xdr:spPr/>
+        <xdr:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p><a:r><a:t>Grouped note</a:t></a:r></a:p>
+        </xdr:txBody>
+      </xdr:sp>
+    </xdr:grpSp>
+    <xdr:clientData/>
+  </xdr:oneCellAnchor>
+  <xdr:twoCellAnchor>
+    <xdr:from><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to><xdr:col>7</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>10</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:graphicFrame>
+      <xdr:nvGraphicFramePr><xdr:cNvPr id="3" name="Revenue Chart"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>
+      <xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>
+      <a:graphic>
+        <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+          <c:chart r:id="rIdChart1"/>
+        </a:graphicData>
+      </a:graphic>
+    </xdr:graphicFrame>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>
+</xdr:wsDr>
+"""
+    drawing_rels_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdChart1"
+    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
+    Target="../charts/chart1.xml"/>
+</Relationships>
+"""
+    chart_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+ xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <c:chart>
+    <c:title>
+      <c:tx>
+        <c:rich>
+          <a:p><a:r><a:t>Annual Revenue</a:t></a:r></a:p>
+        </c:rich>
+      </c:tx>
+    </c:title>
+    <c:plotArea>
+      <c:barChart>
+        <c:ser>
+          <c:idx val="0"/>
+          <c:order val="0"/>
+          <c:tx><c:v>Services</c:v></c:tx>
+          <c:cat>
+            <c:strRef>
+              <c:strCache>
+                <c:pt idx="0"><c:v>Q1</c:v></c:pt>
+                <c:pt idx="1"><c:v>Q2</c:v></c:pt>
+              </c:strCache>
+            </c:strRef>
+          </c:cat>
+        </c:ser>
+      </c:barChart>
+    </c:plotArea>
+    <c:legend>
+      <c:txPr>
+        <a:bodyPr/>
+        <a:lstStyle/>
+        <a:p><a:r><a:t>Legend text</a:t></a:r></a:p>
+      </c:txPr>
+    </c:legend>
+  </c:chart>
+</c:chartSpace>
+"""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("xl/workbook.xml", workbook_xml)
+        archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
+        archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+        archive.writestr("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels_xml)
+        archive.writestr("xl/drawings/drawing1.xml", drawing_xml)
+        archive.writestr("xl/drawings/_rels/drawing1.xml.rels", drawing_rels_xml)
+        archive.writestr("xl/charts/chart1.xml", chart_xml)
+    return buffer.getvalue()
+
+
 class ExcelOOXMLTests(unittest.TestCase):
     def test_parse_workbook_extracts_supported_text_and_summary(self) -> None:
         parsed = parse_workbook(build_test_workbook())
@@ -300,6 +447,52 @@ class ExcelOOXMLTests(unittest.TestCase):
         if text_node is None:
             raise AssertionError("Expected updated text node was not found.")
         self.assertEqual(text_node.text, "Updated text")
+
+    def test_parse_workbook_extracts_shape_and_chart_text_from_drawings(self) -> None:
+        parsed = parse_workbook(build_drawing_chart_workbook())
+
+        location_types = [segment.location_type for segment in parsed.segments]
+        self.assertEqual(parsed.parse_summary["unsupported_object_count"], 0)
+        self.assertEqual(parsed.parse_summary["total_extracted_segments"], 8)
+        self.assertIn("worksheet_cell", location_types)
+        self.assertIn("shape_text", location_types)
+        self.assertIn("chart_title", location_types)
+        self.assertIn("chart_series", location_types)
+        self.assertIn("chart_category", location_types)
+        self.assertIn("chart_legend", location_types)
+        self.assertEqual(parsed.segments[1].cell_address, "Callout Box - paragraph 1")
+        self.assertEqual(parsed.segments[1].original_text, "Shape note")
+        self.assertTrue(
+            any(segment.cell_address == "Grouped Box - paragraph 1" for segment in parsed.segments)
+        )
+
+    def test_export_workbook_writes_shape_and_chart_text_updates(self) -> None:
+        parsed = parse_workbook(build_drawing_chart_workbook())
+        updates = {
+            segment.cell_address: segment.locator
+            for segment in parsed.segments
+            if segment.location_type != "worksheet_cell"
+        }
+        exported_bytes = export_workbook(
+            original_file_bytes=build_drawing_chart_workbook(),
+            segment_updates=[
+                (updates["Callout Box - paragraph 1"], "Updated shape"),
+                (updates["Grouped Box - paragraph 1"], "Updated grouped shape"),
+                (updates["Revenue Chart - text 1"], "Updated title"),
+                (updates["Revenue Chart - text 2"], "Updated category"),
+                (updates["Revenue Chart - text 5"], "Updated legend"),
+            ],
+        )
+
+        with zipfile.ZipFile(io.BytesIO(exported_bytes)) as archive:
+            drawing_xml = archive.read("xl/drawings/drawing1.xml").decode("utf-8")
+            chart_xml = archive.read("xl/charts/chart1.xml").decode("utf-8")
+
+        self.assertIn("Updated shape", drawing_xml)
+        self.assertIn("Updated grouped shape", drawing_xml)
+        self.assertIn("Updated title", chart_xml)
+        self.assertIn("Updated category", chart_xml)
+        self.assertIn("Updated legend", chart_xml)
 
     def test_build_preview_layout_returns_sheet_grid_metadata(self) -> None:
         parsed = parse_workbook(build_test_workbook())

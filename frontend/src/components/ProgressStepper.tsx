@@ -7,6 +7,14 @@ type ProgressStepperProps = {
 }
 
 const STEPS = ['uploaded', 'queued', 'parsing', 'translating', 'review', 'download']
+const FAILURE_STEP_BY_PROGRESS: Array<{ minimumProgress: number; step: string }> = [
+  { minimumProgress: 99, step: 'download' },
+  { minimumProgress: 96, step: 'review' },
+  { minimumProgress: 35, step: 'translating' },
+  { minimumProgress: 10, step: 'parsing' },
+  { minimumProgress: 5, step: 'queued' },
+  { minimumProgress: 0, step: 'uploaded' },
+]
 
 function getStepLabel(step: string): string {
   const labels: Record<string, string> = {
@@ -21,6 +29,13 @@ function getStepLabel(step: string): string {
   return labels[step] ?? step
 }
 
+function getFailedStep(progressPercent: number): string {
+  const failedStep = FAILURE_STEP_BY_PROGRESS.find(
+    ({ minimumProgress }) => progressPercent >= minimumProgress,
+  )
+  return failedStep?.step ?? 'uploaded'
+}
+
 export function ProgressStepper({
   currentStep,
   progressPercent,
@@ -29,7 +44,8 @@ export function ProgressStepper({
   currentCell,
 }: ProgressStepperProps) {
   const normalizedCurrentStep = currentStep === 'preview' ? 'review' : currentStep
-  const currentIndex = STEPS.indexOf(normalizedCurrentStep)
+  const failedStep = normalizedCurrentStep === 'failed' ? getFailedStep(progressPercent) : null
+  const currentIndex = STEPS.indexOf(failedStep ?? normalizedCurrentStep)
 
   return (
     <section className="panel">
@@ -40,9 +56,13 @@ export function ProgressStepper({
       <div className="stepper-scroll">
         <div className="stepper">
           {STEPS.map((step, index) => {
-              const status =
-              normalizedCurrentStep === 'failed'
-                ? 'failed'
+            const status =
+              failedStep !== null
+                ? index < currentIndex
+                  ? 'completed'
+                  : index === currentIndex
+                    ? 'failed'
+                    : 'pending'
                 : index < currentIndex
                   ? 'completed'
                   : index === currentIndex

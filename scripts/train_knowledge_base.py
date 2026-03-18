@@ -10,17 +10,19 @@ import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
 
-from backend.app.services.excel_ooxml import parse_workbook
-from backend.app.services.pptx_ooxml import parse_presentation
 from backend.app.services.text_quality import classify_text, normalize_text_for_lookup, postprocess_translation
 
 
-SUPPORTED_EXTENSIONS = {".xlsx", ".pptx"}
+SUPPORTED_EXTENSIONS = {".xlsx", ".pptx", ".pdf"}
 DEFAULT_TARGET_LANGUAGE = "vi"
 POLL_INTERVAL_SECONDS = 2.0
 POLL_TIMEOUT_SECONDS = 60.0 * 60.0
+FILE_TYPE_CONTENT_TYPES = {
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "pdf": "application/pdf",
+}
 
 
 class ApiError(RuntimeError):
@@ -51,7 +53,7 @@ def _api_request(
     path: str,
     body: bytes | None = None,
     headers: dict[str, str] | None = None,
-) -> Any:
+) -> object:
     request = urllib.request.Request(
         urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/")),
         method=method,
@@ -100,6 +102,17 @@ def _detect_source_language(texts: list[str]) -> str:
     return max(counts, key=counts.get)
 
 
+def _detect_source_language_from_file_name(path: Path) -> str:
+    return _detect_source_language([path.stem])
+
+
+def _content_type_for_file_type(file_type: str) -> str:
+    content_type = FILE_TYPE_CONTENT_TYPES.get(file_type)
+    if content_type is None:
+        raise RuntimeError(f"Unsupported file type {file_type}.")
+    return content_type
+
+
 def _plan_file(path: Path) -> FilePlan:
     if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
         return FilePlan(
@@ -110,11 +123,24 @@ def _plan_file(path: Path) -> FilePlan:
             skipped_reason=f"Unsupported extension {path.suffix}.",
         )
 
+    if path.suffix.lower() == ".pdf":
+        return FilePlan(
+            path=path,
+            file_type="pdf",
+            segment_count=None,
+            detected_source_language=_detect_source_language_from_file_name(path),
+            skipped_reason=None,
+        )
+
     try:
         data = path.read_bytes()
         if path.suffix.lower() == ".xlsx":
+            from backend.app.services.excel_ooxml import parse_workbook
+
             parsed = parse_workbook(data)
         else:
+            from backend.app.services.pptx_ooxml import parse_presentation
+
             parsed = parse_presentation(data)
     except Exception as exc:
         return FilePlan(
@@ -145,19 +171,12 @@ def _target_language_for(source_language: str, preferred_target: str) -> str:
 
 
 def _upload_job(base_url: str, plan: FilePlan) -> str:
-    if plan.file_type == "xlsx":
-        content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    elif plan.file_type == "pptx":
-        content_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-    else:
-        raise RuntimeError(f"Unsupported file type {plan.file_type}.")
-
     payload = _api_request(
         base_url=base_url,
         method="POST",
         path=f"/api/excel/jobs/upload?file_name={urllib.parse.quote(plan.path.name)}",
         body=plan.path.read_bytes(),
-        headers={"Content-Type": content_type},
+        headers={"Content-Type": _content_type_for_file_type(plan.file_type)},
     )
     return str(payload["id"])
 
@@ -177,7 +196,7 @@ def _start_job(base_url: str, job_id: str, source_language: str, target_language
     )
 
 
-def _wait_for_review(base_url: str, job_id: str) -> dict[str, Any]:
+def _wait_for_review(base_url: str, job_id: str) -> dict[str, object]:
     deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         payload = _api_request(
@@ -194,7 +213,7 @@ def _wait_for_review(base_url: str, job_id: str) -> dict[str, Any]:
     raise ApiError(f"Job {job_id} did not reach review state within timeout.")
 
 
-def _fetch_segments(base_url: str, job_id: str) -> list[dict[str, Any]]:
+def _fetch_segments(base_url: str, job_id: str) -> list[dict[str, object]]:
     payload = _api_request(
         base_url=base_url,
         method="GET",
@@ -327,17 +346,26 @@ def _should_save_to_memory(
     return True
 
 
-def _load_manifest(manifest_path: Path) -> dict[str, Any]:
+def _load_manifest(manifest_path: Path) -> dict[str, object]:
     if not manifest_path.exists():
         return {"files": {}, "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
-def _save_manifest(manifest_path: Path, payload: dict[str, Any]) -> None:
+def _save_manifest(manifest_path: Path, payload: dict[str, object]) -> None:
     manifest_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+
+
+def _console_safe_text(value: str, encoding: str | None) -> str:
+    resolved_encoding = encoding or "utf-8"
+    try:
+        value.encode(resolved_encoding)
+    except UnicodeEncodeError:
+        return value.encode("unicode_escape").decode("ascii")
+    return value
 
 
 def run(argv: list[str]) -> int:
@@ -401,21 +429,23 @@ def run(argv: list[str]) -> int:
         )
     _save_manifest(manifest_path, manifest)
 
+    had_failures = False
     for index, plan in enumerate(valid_plans, start=1):
         existing = manifest["files"].get(plan.path.name)
+        display_name = _console_safe_text(plan.path.name, sys.stdout.encoding)
         if existing is not None and existing.get("status") == "completed":
-            print(f"[skip {index}/{len(valid_plans)}] {plan.path.name} already completed.")
+            print(f"[skip {index}/{len(valid_plans)}] {display_name} already completed.")
             continue
 
         assert plan.detected_source_language is not None
-        assert plan.segment_count is not None
         target_language = _target_language_for(
             plan.detected_source_language,
             args.preferred_target_language,
         )
+        segment_count_label = str(plan.segment_count) if plan.segment_count is not None else "unknown"
         print(
-            f"[start {index}/{len(valid_plans)}] {plan.path.name} | "
-            f"{plan.detected_source_language}->{target_language} | {plan.segment_count} segments"
+            f"[start {index}/{len(valid_plans)}] {display_name} | "
+            f"{plan.detected_source_language}->{target_language} | {segment_count_label} segments"
         )
         manifest["files"][plan.path.name] = {
             "status": "running",
@@ -426,7 +456,7 @@ def run(argv: list[str]) -> int:
         }
         _save_manifest(manifest_path, manifest)
 
-        flagged_segments: list[dict[str, Any]] = []
+        flagged_segments: list[dict[str, object]] = []
         try:
             job_id = _upload_job(args.api_base, plan)
             manifest["files"][plan.path.name]["job_id"] = job_id
@@ -472,7 +502,7 @@ def run(argv: list[str]) -> int:
                 if reviewed_text != machine_translation:
                     _update_segment(args.api_base, job_id, str(segment["id"]), reviewed_text)
                     corrected_count += 1
-                elif _should_save_to_memory(
+                if _should_save_to_memory(
                     glossary=glossary,
                     source_text=source_text,
                     translated_text=reviewed_text,
@@ -489,7 +519,6 @@ def run(argv: list[str]) -> int:
             output_error: str | None = None
             destination: Path | None = None
             try:
-                _build_preview(args.api_base, job_id)
                 prepared_file_name = _prepare_download(args.api_base, job_id)
                 destination = output_dir / prepared_file_name
                 _download_output(args.api_base, job_id, destination)
@@ -519,11 +548,12 @@ def run(argv: list[str]) -> int:
             }
             _save_manifest(manifest_path, manifest)
             print(
-                f"[done  {index}/{len(valid_plans)}] {plan.path.name} | "
+                f"[done  {index}/{len(valid_plans)}] {display_name} | "
                 f"accepted={accepted_count} corrected={corrected_count} flagged={len(flagged_segments)}"
                 + (f" output_error={output_error}" if output_error else "")
             )
         except Exception as exc:
+            had_failures = True
             manifest["files"][plan.path.name] = {
                 "status": "failed",
                 "source_language": plan.detected_source_language,
@@ -533,10 +563,10 @@ def run(argv: list[str]) -> int:
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
             _save_manifest(manifest_path, manifest)
-            print(f"[fail  {index}/{len(valid_plans)}] {plan.path.name} | {exc}", file=sys.stderr)
-            return 1
+            print(f"[fail  {index}/{len(valid_plans)}] {display_name} | {exc}", file=sys.stderr)
+            continue
 
-    return 0
+    return 1 if had_failures else 0
 
 
 if __name__ == "__main__":

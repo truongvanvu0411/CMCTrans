@@ -3,6 +3,8 @@ export type LanguageOption = {
   label: string
 }
 
+export type UserRole = 'admin' | 'user'
+
 export type LanguagePair = {
   source: LanguageOption
   targets: LanguageOption[]
@@ -11,7 +13,7 @@ export type LanguagePair = {
 export type JobSummary = {
   id: string
   original_file_name: string
-  file_type: 'xlsx' | 'pptx' | 'pdf' | 'image'
+  file_type: 'xls' | 'xlsx' | 'pptx' | 'docx' | 'pdf' | 'image'
   status: string
   current_step: string
   progress_percent: number
@@ -85,6 +87,56 @@ export type TranslationMemoryEntry = {
   source_text: string
   translated_text: string
   updated_at: string
+}
+
+export type UserAccount = {
+  id: string
+  username: string
+  role: UserRole
+  is_active: boolean
+  created_at: string
+  updated_at: string
+  last_login_at: string | null
+}
+
+export type AuthSession = {
+  session_token: string
+  user: UserAccount
+}
+
+export type ActivityEntry = {
+  id: string
+  user_id: string
+  username: string
+  user_role: UserRole
+  action_type: string
+  target_type: string
+  target_id: string | null
+  description: string
+  metadata: Record<string, string>
+  created_at: string
+}
+
+export type ActivityListResponse = {
+  items: ActivityEntry[]
+  total: number
+  action_types: string[]
+  target_types: string[]
+}
+
+export type AccountListFilters = {
+  query: string
+  role: '' | UserRole
+  isActive: 'all' | 'true' | 'false'
+}
+
+export type ActivityFilters = {
+  userId: string
+  actionType: string
+  targetType: string
+  query: string
+  dateFrom: string
+  dateTo: string
 }
 
 export type PreviewCell = {

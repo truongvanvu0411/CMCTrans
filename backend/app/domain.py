@@ -40,6 +40,7 @@ class JobRecord:
     original_file_name: str
     original_file_path: str
     output_file_path: str | None
+    owner_user_id: str | None
     file_type: str
     status: str
     current_step: str
@@ -57,3 +58,38 @@ class JobRecord:
     translation_summary: dict[str, object]
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True)
+class UserRecord:
+    id: str
+    username: str
+    password_hash: str
+    role: str
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+    last_login_at: datetime | None
+
+
+@dataclass(frozen=True)
+class SessionRecord:
+    id: str
+    user_id: str
+    session_token: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class ActivityRecord:
+    id: str
+    user_id: str
+    username: str
+    user_role: str
+    action_type: str
+    target_type: str
+    target_id: str | None
+    description: str
+    metadata: dict[str, str]
+    created_at: datetime

@@ -20,9 +20,14 @@ class TranslationMemoryRecord:
 
 
 class TranslationMemoryRepository:
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        lock: threading.RLock | None = None,
+    ) -> None:
         self._connection = connection
-        self._lock = threading.RLock()
+        self._lock = lock or threading.RLock()
 
     def find_exact(
         self,

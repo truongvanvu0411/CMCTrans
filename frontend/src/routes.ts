@@ -1,5 +1,6 @@
 export type AppPage =
   | 'dashboard'
+  | 'accounts'
   | 'knowledge'
   | 'translated'
   | 'translated-detail'
@@ -18,6 +19,9 @@ export function parseHashRoute(hashValue: string): AppRoute {
   }
   if (normalized === 'translated') {
     return { page: 'translated', jobId: null }
+  }
+  if (normalized === 'accounts') {
+    return { page: 'accounts', jobId: null }
   }
   if (normalized === 'knowledge') {
     return { page: 'knowledge', jobId: null }
@@ -52,6 +56,9 @@ export function buildRouteHash(route: AppRoute): string {
   }
   if (route.page === 'translated') {
     return '#translated'
+  }
+  if (route.page === 'accounts') {
+    return '#accounts'
   }
   if (route.page === 'knowledge') {
     return '#knowledge'

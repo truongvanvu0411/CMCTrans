@@ -1,6 +1,6 @@
 type DocumentPreviewPanelProps = {
   fileType: 'pdf' | 'image'
-  sourceUrl: string
+  sourceUrl: string | null
   translatedUrl: string | null
   isOutputStale: boolean
   refreshDisabled: boolean
@@ -54,7 +54,13 @@ export function DocumentPreviewPanel({
             <span>Original uploaded document</span>
           </div>
           <div className="document-preview-shell">
-            {renderPreviewFrame(fileType, sourceUrl, 'Source document preview')}
+            {sourceUrl === null ? (
+              <div className="document-preview-placeholder">
+                Source preview is loading.
+              </div>
+            ) : (
+              renderPreviewFrame(fileType, sourceUrl, 'Source document preview')
+            )}
           </div>
         </section>
 

@@ -140,3 +140,51 @@ class KnowledgeSummaryModel(BaseModel):
     glossary_count: int
     protected_term_count: int
     memory_count: int
+
+
+class AuthLoginRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=1, max_length=200)
+
+
+class UserAccountModel(BaseModel):
+    id: str
+    username: str
+    role: str
+    is_active: bool
+    created_at: str
+    updated_at: str
+    last_login_at: str | None
+
+
+class AuthSessionModel(BaseModel):
+    session_token: str
+    user: UserAccountModel
+
+
+class UserAccountUpsertRequest(BaseModel):
+    id: str | None = None
+    username: str = Field(..., min_length=3, max_length=50)
+    role: str = Field(..., min_length=4, max_length=10)
+    is_active: bool = True
+    password: str | None = Field(default=None, min_length=8, max_length=200)
+
+
+class ActivityEntryModel(BaseModel):
+    id: str
+    user_id: str
+    username: str
+    user_role: str
+    action_type: str
+    target_type: str
+    target_id: str | None
+    description: str
+    metadata: dict[str, str]
+    created_at: str
+
+
+class ActivityListResponse(BaseModel):
+    items: list[ActivityEntryModel]
+    total: int
+    action_types: list[str]
+    target_types: list[str]

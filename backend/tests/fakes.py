@@ -212,3 +212,56 @@ class FlakyOcrLayoutRenderer:
             output_suffix=".png",
             media_type="image/png",
         )
+
+
+class SuccessfulOcrLayoutRenderer:
+    def render_document(
+        self,
+        *,
+        file_path: Path,
+        file_type: str,
+        translated_segments: list[object],
+    ) -> RenderedOcrDocument:
+        if file_type == "pdf":
+            return RenderedOcrDocument(
+                file_bytes=(
+                    b"%PDF-1.4\n"
+                    b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+                    b"2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n"
+                    b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 144]>>endobj\n"
+                    b"trailer<</Root 1 0 R>>\n%%EOF"
+                ),
+                output_suffix=".pdf",
+                media_type="application/pdf",
+            )
+        return RenderedOcrDocument(
+            file_bytes=(
+                b"\x89PNG\r\n\x1a\n"
+                b"\x00\x00\x00\rIHDR"
+                b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00"
+                b"\x90wS\xde"
+                b"\x00\x00\x00\x0cIDAT\x08\xd7c\xf8\xff\xff?\x00\x05\xfe\x02\xfeA"
+                b"\x89\x1f\xb5"
+                b"\x00\x00\x00\x00IEND\xaeB`\x82"
+            ),
+            output_suffix=".png",
+            media_type="image/png",
+        )
+
+
+class FakeLegacyExcelConverter:
+    def __init__(self, *, converted_xlsx_bytes: bytes, converted_xls_bytes: bytes) -> None:
+        self._converted_xlsx_bytes = converted_xlsx_bytes
+        self._converted_xls_bytes = converted_xls_bytes
+        self.convert_xls_to_xlsx_calls: list[tuple[Path, Path]] = []
+        self.convert_xlsx_to_xls_calls: list[tuple[Path, Path]] = []
+        self.last_exported_xlsx_bytes: bytes | None = None
+
+    def convert_xls_to_xlsx(self, *, source_path: Path, output_path: Path) -> None:
+        self.convert_xls_to_xlsx_calls.append((source_path, output_path))
+        output_path.write_bytes(self._converted_xlsx_bytes)
+
+    def convert_xlsx_to_xls(self, *, source_path: Path, output_path: Path) -> None:
+        self.convert_xlsx_to_xls_calls.append((source_path, output_path))
+        self.last_exported_xlsx_bytes = source_path.read_bytes()
+        output_path.write_bytes(self._converted_xls_bytes)

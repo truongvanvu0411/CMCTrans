@@ -24,6 +24,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             original_file_name TEXT NOT NULL,
             original_file_path TEXT NOT NULL,
             output_file_path TEXT,
+            owner_user_id TEXT,
             file_type TEXT NOT NULL,
             status TEXT NOT NULL,
             current_step TEXT NOT NULL DEFAULT 'uploaded',
@@ -120,6 +121,49 @@ def initialize_database(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_translation_corrections_job
         ON translation_corrections(job_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_login_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            session_token TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id
+        ON user_sessions(user_id, updated_at);
+
+        CREATE TABLE IF NOT EXISTS activity_logs (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            user_role TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id TEXT,
+            description TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_activity_logs_user_id
+        ON activity_logs(user_id, created_at);
+
+        CREATE INDEX IF NOT EXISTS idx_activity_logs_action_type
+        ON activity_logs(action_type, created_at);
         """
     )
     _ensure_job_columns(connection)
@@ -140,6 +184,7 @@ def _ensure_job_columns(connection: sqlite3.Connection) -> None:
         "current_cell": "TEXT",
         "preview_ready": "INTEGER NOT NULL DEFAULT 0",
         "preview_summary_json": "TEXT NOT NULL DEFAULT '{}'",
+        "owner_user_id": "TEXT",
     }
     for column_name, definition in required_columns.items():
         if column_name in existing_columns:

@@ -5,33 +5,46 @@ import {
   deleteJob,
   deleteProtectedTerm,
   deleteTranslationMemoryEntry,
+  fetchCurrentSession,
+  fetchDownloadedDocumentBlob,
+  fetchGlossaryEntries,
   fetchJob,
   fetchJobs,
-  fetchGlossaryEntries,
   fetchKnowledgeSummary,
   fetchLanguages,
-  fetchSegments,
   fetchProtectedTerms,
+  fetchSegments,
   fetchTranslationMemoryEntries,
+  loadStoredSessionToken,
+  login,
+  logout,
   prepareDownload,
+  registerUnauthorizedHandler,
   saveGlossaryEntry,
   saveProtectedTerm,
   saveTranslationMemoryEntry,
+  setSessionToken,
+  shareSegmentToMemory,
   startJob,
   updateSegment,
   uploadWorkbook,
 } from './api'
+import { AccountManagementPage } from './components/admin/AccountManagementPage'
+import { SystemSettingsPage } from './components/admin/SystemSettingsPage'
 import { DocumentPreviewPanel } from './components/DocumentPreviewPanel'
 import { JobHistory } from './components/JobHistory'
 import { KnowledgeBasePage } from './components/KnowledgeBasePage'
+import { LoginPage } from './components/LoginPage'
 import { Modal } from './components/Modal'
 import { NotificationToast } from './components/NotificationToast'
 import { ProgressStepper } from './components/ProgressStepper'
-import { navigateToRoute, parseHashRoute } from './routes'
 import { Sidebar } from './components/Sidebar'
 import { TranslationEditor } from './components/TranslationEditor'
 import { UploadPanel } from './components/UploadPanel'
+import { useDocumentPreviewArtifacts } from './hooks/useDocumentPreviewArtifacts'
+import { navigateToRoute, parseHashRoute } from './routes'
 import type {
+  AuthSession,
   GlossaryEntry,
   JobSummary,
   KnowledgeSummary,
@@ -44,15 +57,38 @@ import type {
 const DEFAULT_SOURCE_LANGUAGE = 'ja'
 const DEFAULT_TARGET_LANGUAGE = 'en'
 const POLLABLE_STATUSES = new Set(['queued', 'parsing', 'translating'])
+
 type TranslatedRoutePage = 'translated-detail' | 'translated-editor'
 type ToastTone = 'error' | 'success' | 'info'
 type ToastState = {
   message: string
   tone: ToastTone
 }
+type AuthState = 'loading' | 'anonymous' | 'authenticated'
+
+function isAdminRoute(page: string): boolean {
+  return page === 'accounts' || page === 'knowledge' || page === 'settings'
+}
+
+function triggerBlobDownload(blob: Blob, fileName: string): void {
+  const objectUrl = window.URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = objectUrl
+  link.download = fileName
+  link.rel = 'noreferrer'
+  document.body.append(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => {
+    window.URL.revokeObjectURL(objectUrl)
+  }, 0)
+}
 
 export default function App() {
   const [route, setRoute] = useState(() => parseHashRoute(window.location.hash))
+  const [authState, setAuthState] = useState<AuthState>('loading')
+  const [session, setSession] = useState<AuthSession | null>(null)
+  const [authBusy, setAuthBusy] = useState(false)
   const [languagePairs, setLanguagePairs] = useState<LanguagePair[]>([])
   const [jobs, setJobs] = useState<JobSummary[]>([])
   const [job, setJob] = useState<JobSummary | null>(null)
@@ -66,6 +102,7 @@ export default function App() {
   const [starting, setStarting] = useState(false)
   const [deletingJobId, setDeletingJobId] = useState<string | null>(null)
   const [savingSegmentId, setSavingSegmentId] = useState<string | null>(null)
+  const [sharingSegmentId, setSharingSegmentId] = useState<string | null>(null)
   const [previewingDocument, setPreviewingDocument] = useState(false)
   const [documentPreviewVersion, setDocumentPreviewVersion] = useState(0)
   const [warningsOpen, setWarningsOpen] = useState(false)
@@ -75,6 +112,23 @@ export default function App() {
   const [protectedTerms, setProtectedTerms] = useState<ProtectedTerm[]>([])
   const [memoryEntries, setMemoryEntries] = useState<TranslationMemoryEntry[]>([])
   const [knowledgeBusyKey, setKnowledgeBusyKey] = useState<string | null>(null)
+  const currentUser = session?.user ?? null
+  const adminAccessDenied =
+    currentUser !== null && currentUser.role !== 'admin' && isAdminRoute(route.page)
+  const previewActive =
+    (route.page === 'translated-detail' || route.page === 'translated-editor') &&
+    job !== null &&
+    (job.file_type === 'pdf' || job.file_type === 'image')
+
+  const { sourceUrl: sourceDocumentPreviewUrl, translatedUrl: outputDocumentPreviewUrl } =
+    useDocumentPreviewArtifacts({
+      job,
+      active: previewActive,
+      translatedVersion: documentPreviewVersion,
+      onError: (message) => {
+        setToast({ message, tone: 'error' })
+      },
+    })
 
   function clearToast() {
     setToast(null)
@@ -82,6 +136,29 @@ export default function App() {
 
   function showToast(message: string, tone: ToastTone = 'error') {
     setToast({ message, tone })
+  }
+
+  function resetWorkspaceState() {
+    setJob(null)
+    setSegments([])
+    setSegmentDrafts({})
+    setFilterSheet('')
+    setSearchQuery('')
+    setSourceLanguage(DEFAULT_SOURCE_LANGUAGE)
+    setTargetLanguage(DEFAULT_TARGET_LANGUAGE)
+    setDocumentPreviewVersion(0)
+  }
+
+  function clearAuthenticatedState() {
+    setSession(null)
+    setAuthState('anonymous')
+    setJobs([])
+    setLanguagePairs([])
+    setKnowledgeSummary(null)
+    setGlossaryEntries([])
+    setProtectedTerms([])
+    setMemoryEntries([])
+    resetWorkspaceState()
   }
 
   useEffect(() => {
@@ -108,9 +185,57 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    async function bootstrap() {
+    registerUnauthorizedHandler(() => {
+      clearAuthenticatedState()
+      navigateToRoute({ page: 'dashboard', jobId: null })
+      showToast('Session expired. Sign in again.')
+    })
+    return () => {
+      registerUnauthorizedHandler(null)
+    }
+  }, [])
+
+  useEffect(() => {
+    const storedToken = loadStoredSessionToken()
+    if (storedToken === null) {
+      setAuthState('anonymous')
+      return
+    }
+    setSessionToken(storedToken)
+    let cancelled = false
+    void (async () => {
+      try {
+        const currentSession = await fetchCurrentSession()
+        if (cancelled) {
+          return
+        }
+        setSession(currentSession)
+        setAuthState('authenticated')
+      } catch (error) {
+        if (cancelled) {
+          return
+        }
+        setSessionToken(null)
+        setAuthState('anonymous')
+        showToast(error instanceof Error ? error.message : 'Could not restore session.')
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (authState !== 'authenticated' || session === null) {
+      return
+    }
+    let cancelled = false
+    void (async () => {
       try {
         const [pairs, savedJobs] = await Promise.all([fetchLanguages(), fetchJobs()])
+        if (cancelled) {
+          return
+        }
         setLanguagePairs(pairs)
         setJobs(savedJobs)
         const initialRoute = parseHashRoute(window.location.hash)
@@ -124,13 +249,17 @@ export default function App() {
             page: initialRoute.page,
           })
         }
-      } catch (loadError) {
-        showToast(loadError instanceof Error ? loadError.message : 'Could not load dashboard.')
+      } catch (error) {
+        if (cancelled) {
+          return
+        }
+        showToast(error instanceof Error ? error.message : 'Could not load dashboard.')
       }
+    })()
+    return () => {
+      cancelled = true
     }
-
-    void bootstrap()
-  }, [])
+  }, [authState, session?.user.id])
 
   useEffect(() => {
     const currentPair = languagePairs.find((pair) => pair.source.code === sourceLanguage)
@@ -143,6 +272,9 @@ export default function App() {
   }, [languagePairs, sourceLanguage, targetLanguage])
 
   useEffect(() => {
+    if (authState !== 'authenticated') {
+      return
+    }
     if (
       (route.page !== 'translated-detail' && route.page !== 'translated-editor') ||
       !route.jobId
@@ -156,16 +288,20 @@ export default function App() {
       navigate: false,
       page: route.page,
     })
-  }, [route.page, route.jobId, job?.id, segments.length])
+  }, [authState, route.page, route.jobId, job?.id, segments.length])
 
   useEffect(() => {
-    if (route.page !== 'knowledge') {
+    if (
+      authState !== 'authenticated' ||
+      currentUser?.role !== 'admin' ||
+      route.page !== 'knowledge'
+    ) {
       return
     }
     void refreshKnowledge().catch((loadError) => {
       showToast(loadError instanceof Error ? loadError.message : 'Could not load knowledge base.')
     })
-  }, [route.page])
+  }, [authState, currentUser?.role, route.page])
 
   useEffect(() => {
     if (!job || !POLLABLE_STATUSES.has(job.status)) {
@@ -233,28 +369,10 @@ export default function App() {
     setMemoryEntries(memory)
   }
 
-  function resetWorkspaceState() {
-    setJob(null)
-    setSegments([])
-    setSegmentDrafts({})
-    setFilterSheet('')
-    setSearchQuery('')
-    setSourceLanguage(DEFAULT_SOURCE_LANGUAGE)
-    setTargetLanguage(DEFAULT_TARGET_LANGUAGE)
-  }
-
   function syncJobState(nextJob: JobSummary) {
     setJob(nextJob)
     setSourceLanguage(nextJob.source_language ?? DEFAULT_SOURCE_LANGUAGE)
     setTargetLanguage(nextJob.target_language ?? DEFAULT_TARGET_LANGUAGE)
-  }
-
-  function buildSourceDocumentPreviewUrl(jobId: string): string {
-    return `/api/excel/jobs/${jobId}/source-document`
-  }
-
-  function buildOutputDocumentPreviewUrl(jobId: string, version: number): string {
-    return `/api/excel/jobs/${jobId}/download?preview=${version}`
   }
 
   async function loadSegmentsForJob(
@@ -317,6 +435,39 @@ export default function App() {
     setSearchQuery('')
     if (options?.navigate !== false) {
       navigateToRoute({ page: targetPage, jobId })
+    }
+  }
+
+  async function handleLogin(credentials: { username: string; password: string }) {
+    setAuthBusy(true)
+    clearToast()
+    try {
+      const authenticatedSession = await login(credentials.username, credentials.password)
+      setSessionToken(authenticatedSession.session_token)
+      setSession(authenticatedSession)
+      setAuthState('authenticated')
+      navigateToRoute({ page: 'dashboard', jobId: null })
+      showToast('Signed in.', 'success')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not sign in.')
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  async function handleLogout() {
+    setAuthBusy(true)
+    clearToast()
+    try {
+      await logout()
+      setSessionToken(null)
+      clearAuthenticatedState()
+      navigateToRoute({ page: 'dashboard', jobId: null })
+      showToast('Signed out.', 'success')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not sign out.')
+    } finally {
+      setAuthBusy(false)
     }
   }
 
@@ -416,13 +567,23 @@ export default function App() {
     }
   }
 
-  function triggerBrowserDownload(jobId: string) {
-    const link = document.createElement('a')
-    link.href = `/api/excel/jobs/${jobId}/download?ts=${Date.now()}`
-    link.rel = 'noreferrer'
-    document.body.append(link)
-    link.click()
-    link.remove()
+  async function handleShareSegment(segmentId: string) {
+    if (!job) {
+      return
+    }
+    setSharingSegmentId(segmentId)
+    clearToast()
+    try {
+      await shareSegmentToMemory(job.id, segmentId)
+      showToast('Saved to the shared knowledge base.', 'success')
+      if (currentUser?.role === 'admin') {
+        await refreshKnowledge()
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not share this segment.')
+    } finally {
+      setSharingSegmentId(null)
+    }
   }
 
   async function handleDownload() {
@@ -431,8 +592,10 @@ export default function App() {
     }
     clearToast()
     try {
-      await prepareDownload(job.id)
-      triggerBrowserDownload(job.id)
+      const exportResponse = await prepareDownload(job.id)
+      const fileBlob = await fetchDownloadedDocumentBlob(job.id)
+      triggerBlobDownload(fileBlob, exportResponse.file_name)
+      setDocumentPreviewVersion(Date.now())
       await reloadJob(job.id, {
         includeSegments: route.page === 'translated-editor',
         filterSheet,
@@ -579,15 +742,45 @@ export default function App() {
       await deleteTranslationMemoryEntry(entryId)
       await refreshKnowledge()
     } catch (deleteError) {
-      showToast(deleteError instanceof Error ? deleteError.message : 'Could not delete translation memory entry.')
+      showToast(
+        deleteError instanceof Error ? deleteError.message : 'Could not delete translation memory entry.',
+      )
     } finally {
       setKnowledgeBusyKey(null)
     }
   }
 
+  if (authState === 'loading') {
+    return (
+      <main className="login-shell">
+        <section className="login-card">
+          <p className="eyebrow">Access</p>
+          <h1>Loading session</h1>
+          <p className="login-copy">Checking your current workspace session.</p>
+        </section>
+      </main>
+    )
+  }
+
+  if (authState !== 'authenticated' || session === null || currentUser === null) {
+    return (
+      <>
+        <LoginPage busy={authBusy} onSubmit={handleLogin} />
+        {toast ? (
+          <NotificationToast message={toast.message} tone={toast.tone} onDismiss={clearToast} />
+        ) : null}
+      </>
+    )
+  }
+
   return (
     <main className="dashboard-shell">
-      <Sidebar currentPage={route.page} />
+      <Sidebar
+        currentPage={route.page}
+        currentUser={currentUser}
+        logoutBusy={authBusy}
+        onLogout={handleLogout}
+      />
 
       <section className="dashboard-main">
         {route.page === 'dashboard' ? (
@@ -597,7 +790,6 @@ export default function App() {
                 <h1>Dashboard</h1>
                 <p>Track parsing, translation, review, and download in one flow.</p>
               </div>
-              <input className="topbar-search" type="search" placeholder="Search files..." />
             </header>
 
             <div className="summary-card-grid">
@@ -651,9 +843,9 @@ export default function App() {
                     </strong>
                   </div>
                   <div>
-                    <span>Source → Target</span>
+                    <span>Source - Target</span>
                     <strong>
-                      {job.source_language ?? '-'} → {job.target_language ?? '-'}
+                      {job.source_language ?? '-'} - {job.target_language ?? '-'}
                     </strong>
                   </div>
                   <div>
@@ -716,19 +908,45 @@ export default function App() {
         ) : null}
 
         {route.page === 'knowledge' ? (
-          <KnowledgeBasePage
-            summary={knowledgeSummary}
-            glossaryEntries={glossaryEntries}
-            protectedTerms={protectedTerms}
-            memoryEntries={memoryEntries}
-            busyKey={knowledgeBusyKey}
-            onSaveGlossaryEntry={handleSaveGlossaryEntry}
-            onDeleteGlossaryEntry={handleDeleteGlossaryEntry}
-            onSaveProtectedTerm={handleSaveProtectedTerm}
-            onDeleteProtectedTerm={handleDeleteProtectedTerm}
-            onSaveMemoryEntry={handleSaveMemoryEntry}
-            onDeleteMemoryEntry={handleDeleteMemoryEntry}
-          />
+          adminAccessDenied ? (
+            <section className="panel">
+              <div className="panel-header">
+                <p className="eyebrow">Access denied</p>
+                <h2>Admin access is required</h2>
+              </div>
+              <p className="hint">
+                Knowledge Base and System Setting are restricted to admin accounts.
+              </p>
+            </section>
+          ) : (
+            <KnowledgeBasePage
+              summary={knowledgeSummary}
+              glossaryEntries={glossaryEntries}
+              protectedTerms={protectedTerms}
+              memoryEntries={memoryEntries}
+              busyKey={knowledgeBusyKey}
+              onSaveGlossaryEntry={handleSaveGlossaryEntry}
+              onDeleteGlossaryEntry={handleDeleteGlossaryEntry}
+              onSaveProtectedTerm={handleSaveProtectedTerm}
+              onDeleteProtectedTerm={handleDeleteProtectedTerm}
+              onSaveMemoryEntry={handleSaveMemoryEntry}
+              onDeleteMemoryEntry={handleDeleteMemoryEntry}
+            />
+          )
+        ) : null}
+
+        {route.page === 'accounts' ? (
+          adminAccessDenied ? (
+            <section className="panel">
+              <div className="panel-header">
+                <p className="eyebrow">Access denied</p>
+                <h2>Admin access is required</h2>
+              </div>
+              <p className="hint">Only admin accounts can manage workspace accounts.</p>
+            </section>
+          ) : (
+            <AccountManagementPage currentUser={currentUser} onShowToast={showToast} />
+          )
         ) : null}
 
         {route.page === 'translated-detail' ? (
@@ -766,9 +984,9 @@ export default function App() {
                       </strong>
                     </div>
                     <div>
-                      <span>Source → Target</span>
+                      <span>Source - Target</span>
                       <strong>
-                        {job.source_language ?? '-'} → {job.target_language ?? '-'}
+                        {job.source_language ?? '-'} - {job.target_language ?? '-'}
                       </strong>
                     </div>
                     <div>
@@ -818,12 +1036,8 @@ export default function App() {
                 {job.file_type === 'pdf' || job.file_type === 'image' ? (
                   <DocumentPreviewPanel
                     fileType={job.file_type}
-                    sourceUrl={buildSourceDocumentPreviewUrl(job.id)}
-                    translatedUrl={
-                      job.output_file_name === null
-                        ? null
-                        : buildOutputDocumentPreviewUrl(job.id, documentPreviewVersion)
-                    }
+                    sourceUrl={sourceDocumentPreviewUrl}
+                    translatedUrl={outputDocumentPreviewUrl}
                     isOutputStale={job.status === 'review' && job.output_file_name !== null}
                     refreshDisabled={!['review', 'completed'].includes(job.status) || previewingDocument}
                     refreshing={previewingDocument}
@@ -892,9 +1106,9 @@ export default function App() {
                       </strong>
                     </div>
                     <div>
-                      <span>Source → Target</span>
+                      <span>Source - Target</span>
                       <strong>
-                        {job.source_language ?? '-'} → {job.target_language ?? '-'}
+                        {job.source_language ?? '-'} - {job.target_language ?? '-'}
                       </strong>
                     </div>
                     <div>
@@ -906,12 +1120,8 @@ export default function App() {
                 {job.file_type === 'pdf' || job.file_type === 'image' ? (
                   <DocumentPreviewPanel
                     fileType={job.file_type}
-                    sourceUrl={buildSourceDocumentPreviewUrl(job.id)}
-                    translatedUrl={
-                      job.output_file_name === null
-                        ? null
-                        : buildOutputDocumentPreviewUrl(job.id, documentPreviewVersion)
-                    }
+                    sourceUrl={sourceDocumentPreviewUrl}
+                    translatedUrl={outputDocumentPreviewUrl}
                     isOutputStale={job.status === 'review' && job.output_file_name !== null}
                     refreshDisabled={!['review', 'completed'].includes(job.status) || previewingDocument}
                     refreshing={previewingDocument}
@@ -925,6 +1135,7 @@ export default function App() {
                   filterSheet={filterSheet}
                   searchQuery={searchQuery}
                   savingSegmentId={savingSegmentId}
+                  sharingSegmentId={sharingSegmentId}
                   segmentDrafts={segmentDrafts}
                   onFilterSheetChange={(value) => {
                     void handleFilterChange(value)
@@ -939,6 +1150,7 @@ export default function App() {
                     }))
                   }}
                   onSaveSegment={handleSaveSegment}
+                  onShareSegment={handleShareSegment}
                 />
                 <section className="panel editor-footer-panel">
                   <div className="action-row editor-footer-actions">
@@ -954,8 +1166,8 @@ export default function App() {
                     </button>
                   </div>
                   <p className="hint">
-                    Download will export the current edits directly. If export fails, fix the
-                    flagged text and try again.
+                    Save first, then use Save to KB when a correction should become shared knowledge for
+                    the whole system. Download always exports the current saved edits.
                   </p>
                 </section>
               </>
@@ -972,21 +1184,19 @@ export default function App() {
         ) : null}
 
         {route.page === 'settings' ? (
-          <section id="settings">
-            <header className="topbar">
-              <div>
-                <h1>System Setting</h1>
-                <p>Configuration options for local workflow will live here.</p>
-              </div>
-            </header>
+          adminAccessDenied ? (
             <section className="panel">
               <div className="panel-header">
-                <p className="eyebrow">Settings</p>
-                <h2>Coming soon</h2>
+                <p className="eyebrow">Access denied</p>
+                <h2>Admin access is required</h2>
               </div>
-              <p className="hint">Model directories and advanced workflow controls can be added here next.</p>
+              <p className="hint">
+                Only admin accounts can manage users, monitor activity, and access system settings.
+              </p>
             </section>
-          </section>
+          ) : (
+            <SystemSettingsPage currentUser={currentUser} onShowToast={showToast} />
+          )
         ) : null}
 
         <Modal
@@ -1015,11 +1225,7 @@ export default function App() {
           </section>
         </Modal>
         {toast ? (
-          <NotificationToast
-            message={toast.message}
-            tone={toast.tone}
-            onDismiss={clearToast}
-          />
+          <NotificationToast message={toast.message} tone={toast.tone} onDismiss={clearToast} />
         ) : null}
       </section>
     </main>

@@ -230,7 +230,7 @@ export function UploadPanel({
             <div className="upload-copy">
               <strong>Drag and drop your document here, paste an image, or click to browse.</strong>
               <span>
-                Supports `.xlsx`, `.pptx`, `.pdf`, `.png`, `.jpg`, `.jpeg`, `.bmp`, and
+                Supports `.xls`, `.xlsx`, `.pptx`, `.docx`, `.pdf`, `.png`, `.jpg`, `.jpeg`, `.bmp`, and
                 `.webp` files for extraction and review.
               </span>
             </div>
@@ -256,7 +256,7 @@ export function UploadPanel({
             id={inputId}
             className="upload-input-hidden"
             type="file"
-            accept=".xlsx,.pptx,.pdf,.png,.jpg,.jpeg,.bmp,.webp"
+            accept=".xls,.xlsx,.pptx,.docx,.pdf,.png,.jpg,.jpeg,.bmp,.webp"
             disabled={disabled}
             onChange={(event) => {
               void handleChange(event)

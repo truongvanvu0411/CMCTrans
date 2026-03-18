@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.config import AppConfig
 from backend.app.main import create_app
+from backend.tests.auth_helpers import authenticate_client
 from backend.tests.fakes import FakeTranslationService
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -29,6 +30,7 @@ class KnowledgeApiTests(unittest.TestCase):
                 translation_service=FakeTranslationService(),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 summary_response = client.get("/api/knowledge/summary")
                 self.assertEqual(summary_response.status_code, 200)
                 summary_payload = summary_response.json()
@@ -125,6 +127,7 @@ class KnowledgeApiTests(unittest.TestCase):
                 translation_service=FakeTranslationService(),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 first_response = client.post(
                     "/api/knowledge/glossary",
                     json={
@@ -162,6 +165,7 @@ class KnowledgeApiTests(unittest.TestCase):
                 translation_service=FakeTranslationService(),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 response = client.post(
                     "/api/knowledge/memory",
                     json={

@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
+      - "8010:8000"
     environment:
       TRANSLATOR_HOST: 0.0.0.0
       TRANSLATOR_PORT: 8000

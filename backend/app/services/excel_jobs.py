@@ -12,7 +12,7 @@ from typing import Callable
 from ..config import AppConfig
 from ..correction_repository import CorrectionRecord, CorrectionRepository
 from ..domain import JobRecord, SegmentRecord
-from ..memory_repository import TranslationMemoryRepository
+from ..memory_repository import TranslationMemoryRecord, TranslationMemoryRepository
 from ..repository import JobRepository
 from .excel_ooxml import (
     ExcelOOXMLError,
@@ -25,7 +25,18 @@ from .excel_ooxml import (
     list_workbook_sheet_names,
     parse_workbook,
 )
+from .docx_ooxml import (
+    DocxOOXMLError,
+    ExtractedWordSegment,
+    ParsedWordDocument,
+    export_document,
+    parse_document,
+)
 from .glossary import GlossaryService
+from .legacy_excel import (
+    LegacyExcelConversionError,
+    SupportsLegacyExcelConverter,
+)
 from .ocr_document import (
     DocumentOcrError,
     ExtractedOcrSegment,
@@ -59,10 +70,12 @@ def _requires_sheet_name_translation(sheet_name: str) -> bool:
 
 
 def _document_label(file_type: str) -> str:
-    if file_type == "xlsx":
+    if file_type in {"xlsx", "xls"}:
         return "workbook"
     if file_type == "pptx":
         return "presentation"
+    if file_type == "docx":
+        return "document"
     if file_type == "pdf":
         return "PDF document"
     if file_type == "image":
@@ -72,36 +85,42 @@ def _document_label(file_type: str) -> str:
 
 def _resolve_upload_file_type(file_name: str) -> tuple[str, str]:
     lower_file_name = file_name.lower()
+    if lower_file_name.endswith(".xls"):
+        return "xls", ".xls"
     if lower_file_name.endswith(".xlsx"):
         return "xlsx", ".xlsx"
     if lower_file_name.endswith(".pptx"):
         return "pptx", ".pptx"
+    if lower_file_name.endswith(".docx"):
+        return "docx", ".docx"
     if lower_file_name.endswith(".pdf"):
         return "pdf", ".pdf"
     for image_suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
         if lower_file_name.endswith(image_suffix):
             return "image", image_suffix
     raise ExcelJobError(
-        "Only .xlsx, .pptx, .pdf, .png, .jpg, .jpeg, .bmp, and .webp files are supported."
+        "Only .xls, .xlsx, .pptx, .docx, .pdf, .png, .jpg, .jpeg, .bmp, and .webp files are supported."
     )
 
 
 def _parsed_segments(
-    parsed_document: ParsedWorkbook | ParsedPresentation | ParsedOcrDocument,
-) -> list[ExtractedSegment | ExtractedSlideSegment | ExtractedOcrSegment]:
+    parsed_document: ParsedWorkbook | ParsedPresentation | ParsedWordDocument | ParsedOcrDocument,
+) -> list[ExtractedSegment | ExtractedSlideSegment | ExtractedWordSegment | ExtractedOcrSegment]:
     return parsed_document.segments
 
 
 def _parsed_summary(
-    parsed_document: ParsedWorkbook | ParsedPresentation | ParsedOcrDocument,
+    parsed_document: ParsedWorkbook | ParsedPresentation | ParsedWordDocument | ParsedOcrDocument,
 ) -> dict[str, object]:
     return parsed_document.parse_summary
 
 
 def _segment_location_type(
-    segment: ExtractedSegment | ExtractedSlideSegment | ExtractedOcrSegment,
+    segment: ExtractedSegment | ExtractedSlideSegment | ExtractedWordSegment | ExtractedOcrSegment,
 ) -> str:
     if isinstance(segment, ExtractedSlideSegment):
+        return segment.location_type
+    if isinstance(segment, ExtractedWordSegment):
         return segment.location_type
     if isinstance(segment, ExtractedOcrSegment):
         return segment.location_type
@@ -109,30 +128,36 @@ def _segment_location_type(
 
 
 def _segment_group_name(
-    segment: ExtractedSegment | ExtractedSlideSegment | ExtractedOcrSegment,
+    segment: ExtractedSegment | ExtractedSlideSegment | ExtractedWordSegment | ExtractedOcrSegment,
 ) -> str:
     if isinstance(segment, ExtractedSlideSegment):
         return segment.slide_name
+    if isinstance(segment, ExtractedWordSegment):
+        return segment.section_name
     if isinstance(segment, ExtractedOcrSegment):
         return segment.page_name
     return segment.sheet_name
 
 
 def _segment_reference(
-    segment: ExtractedSegment | ExtractedSlideSegment | ExtractedOcrSegment,
+    segment: ExtractedSegment | ExtractedSlideSegment | ExtractedWordSegment | ExtractedOcrSegment,
 ) -> str:
     if isinstance(segment, ExtractedSlideSegment):
         return segment.object_label
+    if isinstance(segment, ExtractedWordSegment):
+        return segment.paragraph_label
     if isinstance(segment, ExtractedOcrSegment):
         return segment.block_label
     return segment.cell_address
 
 
 def _segment_index(
-    segment: ExtractedSegment | ExtractedSlideSegment | ExtractedOcrSegment,
+    segment: ExtractedSegment | ExtractedSlideSegment | ExtractedWordSegment | ExtractedOcrSegment,
 ) -> int:
     if isinstance(segment, ExtractedSlideSegment):
         return segment.slide_index
+    if isinstance(segment, ExtractedWordSegment):
+        return segment.section_index
     if isinstance(segment, ExtractedOcrSegment):
         return segment.page_index
     return segment.sheet_index
@@ -165,6 +190,7 @@ class ExcelJobService:
         ocr_service: SupportsDocumentOcr,
         ocr_layout_renderer: SupportsOcrLayoutRenderer,
         glossary: GlossaryService,
+        legacy_excel_converter: SupportsLegacyExcelConverter,
     ) -> None:
         self._config = config
         self._repository = repository
@@ -174,11 +200,12 @@ class ExcelJobService:
         self._ocr_service = ocr_service
         self._ocr_layout_renderer = ocr_layout_renderer
         self._glossary = glossary
+        self._legacy_excel_converter = legacy_excel_converter
         self._active_jobs: set[str] = set()
         self._active_jobs_lock = threading.Lock()
         (self._config.workspace_dir / "jobs").mkdir(parents=True, exist_ok=True)
 
-    def create_job(self, *, file_name: str, file_bytes: bytes) -> JobRecord:
+    def create_job(self, *, file_name: str, file_bytes: bytes, owner_user_id: str) -> JobRecord:
         file_type, original_suffix = _resolve_upload_file_type(file_name)
 
         job_id = str(uuid.uuid4())
@@ -193,6 +220,7 @@ class ExcelJobService:
             original_file_name=file_name,
             original_file_path=str(original_file_path),
             output_file_path=None,
+            owner_user_id=owner_user_id,
             file_type=file_type,
             status="uploaded",
             current_step="uploaded",
@@ -253,6 +281,27 @@ class ExcelJobService:
         except OSError as exc:
             raise ExcelJobError(f"Could not delete job files: {exc}") from exc
         self._repository.delete_job(job_id)
+
+    def _resolved_workbook_source_path(self, job: JobRecord) -> Path:
+        original_file_path = Path(job.original_file_path)
+        if job.file_type == "xlsx":
+            return original_file_path
+        if job.file_type != "xls":
+            raise ExcelJobError(f"Workbook source is unavailable for file type: {job.file_type}.")
+        converted_workbook_path = original_file_path.parent / "_legacy_source_workbook.xlsx"
+        if converted_workbook_path.exists():
+            return converted_workbook_path
+        try:
+            self._legacy_excel_converter.convert_xls_to_xlsx(
+                source_path=original_file_path,
+                output_path=converted_workbook_path,
+            )
+        except LegacyExcelConversionError as exc:
+            raise ExcelJobError(str(exc)) from exc
+        return converted_workbook_path
+
+    def _load_workbook_source_bytes(self, job: JobRecord) -> bytes:
+        return self._resolved_workbook_source_path(job).read_bytes()
 
     def start_job(
         self, job_id: str, *, source_language: str, target_language: str
@@ -343,13 +392,6 @@ class ExcelJobService:
         )
         if clean_correction is not None:
             now = _utc_now()
-            self._upsert_bidirectional_memory(
-                source_language=source_language,
-                target_language=target_language,
-                source_text=clean_correction.source_text,
-                translated_text=clean_correction.corrected_translation,
-                now=now,
-            )
             self._correction_repository.create(
                 CorrectionRecord(
                     id=str(uuid.uuid4()),
@@ -367,6 +409,40 @@ class ExcelJobService:
         if updated_segment is None:
             raise ExcelJobError("Updated segment could not be loaded.")
         return updated_segment
+
+    def share_segment_to_memory(self, job_id: str, segment_id: str) -> TranslationMemoryRecord:
+        job = self.get_job(job_id)
+        segment = self._repository.get_segment(job_id, segment_id)
+        if segment is None:
+            raise ExcelJobError(f"Segment {segment_id} was not found in job {job_id}.")
+        source_language = job.source_language
+        target_language = job.target_language
+        if source_language is None or target_language is None:
+            raise ExcelJobError("Job language route is missing.")
+        clean_correction = build_clean_correction(
+            source_text=segment.normalized_text,
+            machine_translation=segment.machine_translation,
+            corrected_translation=segment.final_text,
+            glossary=self._glossary,
+        )
+        if clean_correction is None:
+            raise ExcelJobError("Only meaningful text edits can be saved to the knowledge base.")
+        now = _utc_now()
+        self._upsert_bidirectional_memory(
+            source_language=source_language,
+            target_language=target_language,
+            source_text=clean_correction.source_text,
+            translated_text=clean_correction.corrected_translation,
+            now=now,
+        )
+        saved_entry = self._memory_repository.find_exact(
+            source_language=source_language,
+            target_language=target_language,
+            source_text=clean_correction.source_text,
+        )
+        if saved_entry is None:
+            raise ExcelJobError("Shared knowledge entry could not be reloaded.")
+        return saved_entry
 
     def complete_review(self, job_id: str) -> JobRecord:
         job = self.get_job(job_id)
@@ -423,13 +499,13 @@ class ExcelJobService:
         )
 
     def _translate_sheet_name_updates(self, job: JobRecord) -> dict[str, str]:
-        if job.file_type != "xlsx":
+        if job.file_type not in {"xlsx", "xls"}:
             return {}
         source_language = job.source_language
         target_language = job.target_language
         if source_language is None or target_language is None:
             raise ExcelJobError("Job language route is missing.")
-        workbook_bytes = Path(job.original_file_path).read_bytes()
+        workbook_bytes = self._load_workbook_source_bytes(job)
         try:
             original_sheet_names = list_workbook_sheet_names(workbook_bytes)
         except ExcelOOXMLError as exc:
@@ -483,9 +559,13 @@ class ExcelJobService:
             raise ExcelJobError("No final translations are available for preview.")
 
         sheet_name_updates = self._translate_sheet_name_updates(job)
-        original_file_bytes = Path(job.original_file_path).read_bytes()
+        original_file_bytes = (
+            self._load_workbook_source_bytes(job)
+            if job.file_type in {"xlsx", "xls"}
+            else Path(job.original_file_path).read_bytes()
+        )
         try:
-            if job.file_type == "xlsx":
+            if job.file_type in {"xlsx", "xls"}:
                 preview_summary = build_preview_layout(
                     original_file_bytes=original_file_bytes,
                     translated_segments=[
@@ -518,7 +598,7 @@ class ExcelJobService:
                 )
             else:
                 raise ExcelJobError(f"Unsupported file type: {job.file_type}.")
-        except (ExcelOOXMLError, PptxOOXMLError) as exc:
+        except (ExcelOOXMLError, PptxOOXMLError, DocxOOXMLError) as exc:
             raise ExcelJobError(str(exc)) from exc
         preview_summary["edited_segments"] = len(
             [segment for segment in preview_segments if segment.status == "edited"]
@@ -617,20 +697,34 @@ class ExcelJobService:
         if target_language is None:
             raise ExcelJobError("Job target language is missing.")
         sheet_name_updates = self._translate_sheet_name_updates(job)
-        original_file_bytes = Path(job.original_file_path).read_bytes()
         try:
-            if job.file_type == "xlsx":
-                exported_bytes = export_workbook(
-                    original_file_bytes=original_file_bytes,
+            if job.file_type in {"xlsx", "xls"}:
+                exported_workbook_bytes = export_workbook(
+                    original_file_bytes=self._load_workbook_source_bytes(job),
                     segment_updates=[
                         (segment.locator, segment.final_text or "")
                         for segment in exportable_segments
                     ],
                     sheet_name_updates=sheet_name_updates,
                 )
+                if job.file_type == "xlsx":
+                    exported_bytes = exported_workbook_bytes
+                else:
+                    intermediate_workbook_path = (
+                        Path(job.original_file_path).parent / "_translated_legacy_workbook.xlsx"
+                    )
+                    intermediate_workbook_path.write_bytes(exported_workbook_bytes)
             elif job.file_type == "pptx":
                 exported_bytes = export_presentation(
-                    original_file_bytes=original_file_bytes,
+                    original_file_bytes=Path(job.original_file_path).read_bytes(),
+                    segment_updates=[
+                        (segment.locator, segment.final_text or "")
+                        for segment in exportable_segments
+                    ],
+                )
+            elif job.file_type == "docx":
+                exported_bytes = export_document(
+                    original_file_bytes=Path(job.original_file_path).read_bytes(),
                     segment_updates=[
                         (segment.locator, segment.final_text or "")
                         for segment in exportable_segments
@@ -653,7 +747,14 @@ class ExcelJobService:
                 exported_bytes = rendered_document.file_bytes
             else:
                 raise ExcelJobError(f"Unsupported file type: {job.file_type}.")
-        except (ExcelOOXMLError, PptxOOXMLError, DocumentOcrError, DocumentLayoutError) as exc:
+        except (
+            ExcelOOXMLError,
+            PptxOOXMLError,
+            DocxOOXMLError,
+            DocumentOcrError,
+            DocumentLayoutError,
+            LegacyExcelConversionError,
+        ) as exc:
             self._update_job(
                 job_id,
                 status=export_status,
@@ -676,15 +777,46 @@ class ExcelJobService:
 
         if job.file_type == "xlsx":
             output_suffix = ".xlsx"
+        elif job.file_type == "xls":
+            output_suffix = ".xls"
         elif job.file_type == "pptx":
             output_suffix = ".pptx"
+        elif job.file_type == "docx":
+            output_suffix = ".docx"
         elif job.file_type in {"pdf", "image"}:
             output_suffix = rendered_document.output_suffix
         else:
             raise ExcelJobError(f"Unsupported file type: {job.file_type}.")
         output_file_name = f"{Path(job.original_file_name).stem}.{target_language}{output_suffix}"
         output_file_path = Path(job.original_file_path).parent / output_file_name
-        output_file_path.write_bytes(exported_bytes)
+        try:
+            if job.file_type == "xls":
+                self._legacy_excel_converter.convert_xlsx_to_xls(
+                    source_path=Path(job.original_file_path).parent / "_translated_legacy_workbook.xlsx",
+                    output_path=output_file_path,
+                )
+            else:
+                output_file_path.write_bytes(exported_bytes)
+        except LegacyExcelConversionError as exc:
+            self._update_job(
+                job_id,
+                status=export_status,
+                current_step="review",
+                progress_percent=export_progress,
+                processed_segments=job.processed_segments,
+                total_segments=job.total_segments,
+                status_message=str(exc),
+                current_sheet=None,
+                current_cell=None,
+                preview_ready=job.preview_ready,
+                preview_summary=job.preview_summary,
+                source_language=job.source_language,
+                target_language=job.target_language,
+                parse_summary=job.parse_summary,
+                translation_summary=job.translation_summary,
+                output_file_path=job.output_file_path,
+            )
+            raise ExcelJobError(str(exc)) from exc
 
         self._update_job(
             job_id,
@@ -784,9 +916,9 @@ class ExcelJobService:
             output_file_path=job.output_file_path,
         )
         try:
-            if job.file_type == "xlsx":
+            if job.file_type in {"xlsx", "xls"}:
                 parsed_document = parse_workbook(
-                    Path(job.original_file_path).read_bytes(),
+                    self._load_workbook_source_bytes(job),
                     progress_callback=on_excel_parse_progress,
                 )
             elif job.file_type == "pptx":
@@ -794,6 +926,8 @@ class ExcelJobService:
                     Path(job.original_file_path).read_bytes(),
                     progress_callback=on_pptx_parse_progress,
                 )
+            elif job.file_type == "docx":
+                parsed_document = parse_document(Path(job.original_file_path).read_bytes())
             elif job.file_type in {"pdf", "image"}:
                 parsed_document = self._ocr_service.parse_document(
                     file_path=Path(job.original_file_path),
@@ -802,7 +936,13 @@ class ExcelJobService:
                 )
             else:
                 raise ExcelJobError(f"Unsupported file type: {job.file_type}.")
-        except (ExcelOOXMLError, PptxOOXMLError, DocumentOcrError) as exc:
+        except (
+            ExcelOOXMLError,
+            PptxOOXMLError,
+            DocxOOXMLError,
+            DocumentOcrError,
+            LegacyExcelConversionError,
+        ) as exc:
             raise ExcelJobError(str(exc)) from exc
 
         now = _utc_now()
@@ -831,6 +971,10 @@ class ExcelJobService:
             for index, segment in enumerate(_parsed_segments(parsed_document))
         ]
         self._repository.replace_segments(job_id, segments)
+        parse_summary = dict(_parsed_summary(parsed_document))
+        if job.file_type == "xls":
+            parse_summary["source_file_type"] = "xls"
+            parse_summary["working_file_type"] = "xlsx"
         self._update_job(
             job_id,
             status="translating",
@@ -845,7 +989,7 @@ class ExcelJobService:
             preview_summary={},
             source_language=source_language,
             target_language=target_language,
-            parse_summary=_parsed_summary(parsed_document),
+            parse_summary=parse_summary,
             translation_summary={"status": "running"},
             output_file_path=job.output_file_path,
         )

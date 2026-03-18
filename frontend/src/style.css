@@ -54,6 +54,8 @@ a {
 }
 
 .sidebar {
+  display: flex;
+  flex-direction: column;
   position: sticky;
   top: 0;
   height: 100vh;
@@ -64,30 +66,44 @@ a {
 }
 
 .brand-card {
-  display: flex;
+  display: grid;
   gap: 14px;
-  align-items: center;
-  padding: 14px 12px;
+  justify-items: center;
+  padding: 18px 16px;
   border: 1px solid var(--card-border);
   border-radius: 18px;
   background: var(--bg-panel);
+  text-align: center;
 }
 
-.brand-logo {
+.brand-logo-image {
+  display: block;
+  width: 84px;
+  height: 84px;
+  object-fit: contain;
+}
+
+.brand-session-meta {
   display: grid;
-  place-items: center;
-  width: 44px;
-  height: 44px;
-  border-radius: 14px;
-  background: #3292ff;
-  color: #ffffff;
-  font-weight: 800;
+  gap: 4px;
+  width: 100%;
+  padding-top: 12px;
+  border-top: 1px solid #edf1f7;
 }
 
-.brand-card p {
-  margin: 4px 0 0;
+.brand-session-meta strong {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-size: 1.02rem;
+}
+
+.brand-session-meta span {
   color: var(--text-muted);
-  font-size: 0.88rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
 .sidebar-nav {
@@ -105,6 +121,19 @@ a {
 .sidebar-nav a.active {
   color: #ff7d4b;
   background: #fff5ee;
+}
+
+.sidebar-logout-shell {
+  margin-top: auto;
+  padding-top: 20px;
+}
+
+.sidebar-logout-button {
+  width: 100%;
+  min-height: 48px;
+  border-radius: 16px;
+  background: #f6f8fc;
+  font-weight: 700;
 }
 
 .dashboard-main {
@@ -196,6 +225,45 @@ a {
   margin-bottom: 18px;
 }
 
+.login-shell {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 24px;
+  background:
+    radial-gradient(circle at top left, rgba(41, 179, 164, 0.16), transparent 32%),
+    radial-gradient(circle at bottom right, rgba(239, 142, 68, 0.18), transparent 30%),
+    #f4f2ef;
+}
+
+.login-card {
+  width: min(460px, 100%);
+  padding: 32px;
+  border: 1px solid var(--card-border);
+  border-radius: 28px;
+  background: var(--bg-panel);
+  box-shadow: var(--card-shadow);
+}
+
+.login-card h1 {
+  margin: 0;
+}
+
+.login-copy {
+  margin: 12px 0 0;
+  color: var(--text-muted);
+}
+
+.login-form {
+  display: grid;
+  gap: 16px;
+  margin-top: 22px;
+}
+
+.login-submit {
+  width: 100%;
+}
+
 .panel-header {
   margin-bottom: 16px;
 }
@@ -225,6 +293,161 @@ a {
 
 .upload-start-button {
   white-space: nowrap;
+}
+
+.admin-filter-grid,
+.admin-form-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.admin-filter-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 18px;
+}
+
+.activity-filter-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.activity-query-field {
+  grid-column: span 2;
+}
+
+.admin-two-column-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.9fr);
+  align-items: start;
+}
+
+.admin-form-card {
+  padding: 20px;
+  border: 1px solid var(--card-border);
+  border-radius: 18px;
+  background: var(--bg-soft);
+}
+
+.account-refresh-button {
+  align-self: end;
+  min-height: 46px;
+  padding: 12px 18px;
+  font-weight: 600;
+}
+
+.admin-table-shell {
+  overflow-x: auto;
+}
+
+.admin-table td,
+.admin-table th {
+  vertical-align: top;
+}
+
+.activity-table td {
+  min-width: 140px;
+}
+
+.inline-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.field-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 24px;
+}
+
+.field-checkbox span {
+  color: inherit;
+  letter-spacing: normal;
+  text-transform: none;
+  font-size: 0.95rem;
+}
+
+.account-editor-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 16px;
+}
+
+.account-editor-grid-span {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+}
+
+.account-editor-section-label {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.account-checkbox-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 14px;
+  align-items: start;
+  padding: 16px 18px;
+  border: 1px solid var(--card-border);
+  border-radius: 16px;
+  background: #faf8f5;
+  cursor: pointer;
+}
+
+.account-checkbox-card input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.account-checkbox-control {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  border: 1px solid #c9d2e2;
+  border-radius: 7px;
+  background: #ffffff;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.account-checkbox-card input:checked + .account-checkbox-control {
+  border-color: var(--blue);
+  background: var(--blue);
+  box-shadow: 0 10px 24px rgba(79, 124, 255, 0.18);
+}
+
+.account-checkbox-card input:checked + .account-checkbox-control::after {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 3px;
+  width: 5px;
+  height: 10px;
+  border: solid #ffffff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.account-checkbox-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.account-checkbox-copy strong {
+  font-size: 1rem;
+}
+
+.account-checkbox-copy small {
+  color: var(--text-muted);
+  font-size: 0.9rem;
 }
 
 .eyebrow {
@@ -574,6 +797,31 @@ input {
 .icon-button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.inline-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.inline-icon-button {
+  width: 38px;
+  height: 38px;
+}
+
+.inline-icon-button.danger {
+  color: var(--danger);
+}
+
+.panel-header-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+}
+
+.modal-action-row {
+  margin-top: 20px;
 }
 
 .button-icon {
@@ -1264,7 +1512,7 @@ input {
 }
 
 .modal-card {
-  width: min(1400px, 100%);
+  width: min(760px, 100%);
   max-height: calc(100vh - 64px);
   display: grid;
   grid-template-rows: auto 1fr;
@@ -1280,7 +1528,7 @@ input {
   justify-content: space-between;
   align-items: center;
   gap: 16px;
-  padding: 20px 24px;
+  padding: 22px 28px;
   border-bottom: 1px solid #eef1f5;
 }
 
@@ -1290,7 +1538,7 @@ input {
 
 .modal-body {
   overflow: auto;
-  padding: 0;
+  padding: 24px 28px 28px;
 }
 
 .ppt-preview-shell {
@@ -1655,6 +1903,15 @@ input {
 }
 
 @media (max-width: 1180px) {
+  .admin-two-column-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-filter-grid,
+  .activity-filter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .dashboard-shell {
     grid-template-columns: 1fr;
     height: auto;
@@ -1762,5 +2019,32 @@ input {
     border-right: 0;
     border-left: 0;
     border-bottom: 1px solid #eef1f5;
+  }
+}
+
+@media (max-width: 720px) {
+  .admin-filter-grid,
+  .activity-filter-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .activity-query-field {
+    grid-column: span 1;
+  }
+
+  .account-editor-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .modal-overlay {
+    padding: 16px;
+  }
+
+  .modal-header {
+    padding: 18px 20px;
+  }
+
+  .modal-body {
+    padding: 18px 20px 20px;
   }
 }

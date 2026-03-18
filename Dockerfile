@@ -23,6 +23,7 @@ COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --no-cache-dir --prefer-binary -r /app/backend/requirements.txt
 
 COPY backend /app/backend
+COPY logo /app/logo
 COPY --from=frontend-build /app/frontend/dist /app/frontend_dist
 
 RUN mkdir -p /app/workspace /app/models

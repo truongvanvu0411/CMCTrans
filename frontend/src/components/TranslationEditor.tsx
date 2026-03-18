@@ -3,16 +3,18 @@ import { useMemo } from 'react'
 import type { Segment } from '../types'
 
 type TranslationEditorProps = {
-  fileType: 'xlsx' | 'pptx' | 'pdf' | 'image'
+  fileType: 'xls' | 'xlsx' | 'pptx' | 'docx' | 'pdf' | 'image'
   segments: Segment[]
   filterSheet: string
   searchQuery: string
   savingSegmentId: string | null
+  sharingSegmentId: string | null
   segmentDrafts: Record<string, string>
   onFilterSheetChange: (value: string) => void
   onSearchQueryChange: (value: string) => void
   onDraftChange: (segmentId: string, value: string) => void
   onSaveSegment: (segmentId: string) => Promise<void>
+  onShareSegment: (segmentId: string) => Promise<void>
 }
 
 function estimateTextRows(text: string): number {
@@ -33,17 +35,35 @@ export function TranslationEditor({
   filterSheet,
   searchQuery,
   savingSegmentId,
+  sharingSegmentId,
   segmentDrafts,
   onFilterSheetChange,
   onSearchQueryChange,
   onDraftChange,
   onSaveSegment,
+  onShareSegment,
 }: TranslationEditorProps) {
   const sheetOptions = useMemo(() => {
     return [...new Set(segments.map((segment) => segment.sheet_name))]
   }, [segments])
-  const containerLabel = fileType === 'pptx' ? 'Slide' : fileType === 'pdf' ? 'Page' : fileType === 'image' ? 'Image' : 'Sheet'
-  const referenceLabel = fileType === 'pptx' ? 'Object' : fileType === 'pdf' || fileType === 'image' ? 'Region' : 'Cell'
+  const containerLabel =
+    fileType === 'pptx'
+      ? 'Slide'
+      : fileType === 'pdf'
+        ? 'Page'
+        : fileType === 'image'
+          ? 'Image'
+          : fileType === 'docx'
+            ? 'Section'
+            : 'Sheet'
+  const referenceLabel =
+    fileType === 'pptx'
+      ? 'Object'
+      : fileType === 'pdf' || fileType === 'image'
+        ? 'Region'
+        : fileType === 'docx'
+          ? 'Paragraph'
+          : 'Cell'
 
   return (
     <section className="panel">
@@ -90,6 +110,7 @@ export function TranslationEditor({
           {segments.map((segment) => {
             const draftValue = segmentDrafts[segment.id] ?? segment.final_text ?? ''
             const hasLayoutReviewWarning = segment.warning_codes.includes('layout_review_required')
+            const requiresSaveBeforeShare = draftValue !== (segment.final_text ?? '')
             const rowCount = Math.max(
               estimateTextRows(segment.original_text),
               estimateTextRows(segment.machine_translation ?? ''),
@@ -139,7 +160,24 @@ export function TranslationEditor({
                     >
                       {savingSegmentId === segment.id ? 'Saving...' : 'Save'}
                     </button>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={
+                        sharingSegmentId === segment.id ||
+                        requiresSaveBeforeShare ||
+                        !(segment.final_text ?? '').trim()
+                      }
+                      onClick={() => {
+                        void onShareSegment(segment.id)
+                      }}
+                    >
+                      {sharingSegmentId === segment.id ? 'Sharing...' : 'Save to KB'}
+                    </button>
                   </div>
+                  {requiresSaveBeforeShare ? (
+                    <p className="editor-machine-hint">Save the edit first before sharing it to the system knowledge base.</p>
+                  ) : null}
                 </div>
               </article>
             )

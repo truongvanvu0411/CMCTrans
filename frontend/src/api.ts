@@ -1,4 +1,8 @@
 import type {
+  AccountListFilters,
+  ActivityFilters,
+  ActivityListResponse,
+  AuthSession,
   ExportResponse,
   GlossaryEntry,
   JobSummary,
@@ -9,19 +13,69 @@ import type {
   Segment,
   SegmentListResponse,
   TranslationMemoryEntry,
+  UserAccount,
 } from './types'
 
 type ErrorResponse = {
   detail: string
 }
 
+const SESSION_TOKEN_STORAGE_KEY = 'cmctrans.sessionToken'
+
+let sessionToken: string | null = readStoredSessionToken()
+let unauthorizedHandler: (() => void) | null = null
+
+export class ApiError extends Error {
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+function readStoredSessionToken(): string | null {
+  if (typeof window === 'undefined') {
+    return null
+  }
+  const storedToken = window.localStorage.getItem(SESSION_TOKEN_STORAGE_KEY)
+  return storedToken && storedToken.trim() ? storedToken : null
+}
+
+export function loadStoredSessionToken(): string | null {
+  return readStoredSessionToken()
+}
+
+export function setSessionToken(nextToken: string | null): void {
+  sessionToken = nextToken && nextToken.trim() ? nextToken.trim() : null
+  if (typeof window === 'undefined') {
+    return
+  }
+  if (sessionToken === null) {
+    window.localStorage.removeItem(SESSION_TOKEN_STORAGE_KEY)
+    return
+  }
+  window.localStorage.setItem(SESSION_TOKEN_STORAGE_KEY, sessionToken)
+}
+
+export function registerUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler
+}
+
 function uploadContentType(fileName: string): string {
   const lowerFileName = fileName.toLowerCase()
+  if (lowerFileName.endsWith('.xls')) {
+    return 'application/vnd.ms-excel'
+  }
   if (lowerFileName.endsWith('.xlsx')) {
     return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   }
   if (lowerFileName.endsWith('.pptx')) {
     return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  }
+  if (lowerFileName.endsWith('.docx')) {
+    return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
   }
   if (lowerFileName.endsWith('.pdf')) {
     return 'application/pdf'
@@ -39,58 +93,132 @@ function uploadContentType(fileName: string): string {
     return 'image/webp'
   }
   throw new Error(
-    'Only .xlsx, .pptx, .pdf, .png, .jpg, .jpeg, .bmp, and .webp files are supported.',
+    'Only .xls, .xlsx, .pptx, .docx, .pdf, .png, .jpg, .jpeg, .bmp, and .webp files are supported.',
   )
 }
 
-async function parseJsonResponse<T>(response: Response): Promise<T> {
-  const data = (await response.json()) as T | ErrorResponse
-  if (!response.ok) {
+function buildHeaders(initHeaders?: HeadersInit, includeJsonContentType = false): Headers {
+  const headers = new Headers(initHeaders)
+  if (includeJsonContentType && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+  if (sessionToken !== null) {
+    headers.set('Authorization', `Bearer ${sessionToken}`)
+  }
+  return headers
+}
+
+async function parseError(response: Response): Promise<ApiError> {
+  const responseContentType = response.headers.get('content-type') ?? ''
+  if (responseContentType.includes('application/json')) {
+    const data = (await response.json()) as ErrorResponse | Record<string, unknown>
     const message =
-      typeof data === 'object' && data !== null && 'detail' in data
+      typeof data === 'object' && data !== null && 'detail' in data && typeof data.detail === 'string'
         ? data.detail
         : 'Request failed.'
-    throw new Error(message)
+    return new ApiError(message, response.status)
   }
-  return data as T
+  const text = await response.text()
+  return new ApiError(text || 'Request failed.', response.status)
+}
+
+async function requestJson<T>(
+  input: string,
+  init?: RequestInit,
+): Promise<T> {
+  const response = await fetch(input, {
+    ...init,
+    headers: buildHeaders(init?.headers),
+  })
+  if (!response.ok) {
+    const error = await parseError(response)
+    if (error.status === 401) {
+      setSessionToken(null)
+      unauthorizedHandler?.()
+    }
+    throw error
+  }
+  return (await response.json()) as T
+}
+
+async function requestVoid(input: string, init?: RequestInit): Promise<void> {
+  const response = await fetch(input, {
+    ...init,
+    headers: buildHeaders(init?.headers),
+  })
+  if (!response.ok) {
+    const error = await parseError(response)
+    if (error.status === 401) {
+      setSessionToken(null)
+      unauthorizedHandler?.()
+    }
+    throw error
+  }
+}
+
+async function requestBlob(input: string, init?: RequestInit): Promise<Blob> {
+  const response = await fetch(input, {
+    ...init,
+    headers: buildHeaders(init?.headers),
+  })
+  if (!response.ok) {
+    const error = await parseError(response)
+    if (error.status === 401) {
+      setSessionToken(null)
+      unauthorizedHandler?.()
+    }
+    throw error
+  }
+  return await response.blob()
+}
+
+export async function login(username: string, password: string): Promise<AuthSession> {
+  return requestJson<AuthSession>('/api/auth/login', {
+    method: 'POST',
+    headers: buildHeaders(undefined, true),
+    body: JSON.stringify({ username, password }),
+  })
+}
+
+export async function fetchCurrentSession(): Promise<AuthSession> {
+  return requestJson<AuthSession>('/api/auth/session')
+}
+
+export async function logout(): Promise<void> {
+  await requestVoid('/api/auth/logout', {
+    method: 'POST',
+  })
 }
 
 export async function fetchLanguages(): Promise<LanguagePair[]> {
-  const response = await fetch('/api/languages')
-  return parseJsonResponse<LanguagePair[]>(response)
+  return requestJson<LanguagePair[]>('/api/languages')
 }
 
 export async function uploadWorkbook(file: File): Promise<JobSummary> {
-  const response = await fetch(
+  return requestJson<JobSummary>(
     `/api/excel/jobs/upload?file_name=${encodeURIComponent(file.name)}`,
     {
       method: 'POST',
-      headers: {
+      headers: buildHeaders({
         'Content-Type': uploadContentType(file.name),
-      },
+      }),
       body: await file.arrayBuffer(),
     },
   )
-  return parseJsonResponse<JobSummary>(response)
 }
 
 export async function fetchJobs(): Promise<JobSummary[]> {
-  const response = await fetch('/api/excel/jobs')
-  return parseJsonResponse<JobSummary[]>(response)
+  return requestJson<JobSummary[]>('/api/excel/jobs')
 }
 
 export async function fetchJob(jobId: string): Promise<JobSummary> {
-  const response = await fetch(`/api/excel/jobs/${jobId}`)
-  return parseJsonResponse<JobSummary>(response)
+  return requestJson<JobSummary>(`/api/excel/jobs/${jobId}`)
 }
 
 export async function deleteJob(jobId: string): Promise<void> {
-  const response = await fetch(`/api/excel/jobs/${jobId}`, {
+  await requestVoid(`/api/excel/jobs/${jobId}`, {
     method: 'DELETE',
   })
-  if (!response.ok) {
-    await parseJsonResponse<{ detail: string }>(response)
-  }
 }
 
 export async function fetchSegments(
@@ -108,12 +236,11 @@ export async function fetchSegments(
     params.set('query', options.query.trim())
   }
   const queryString = params.toString()
-  const response = await fetch(
+  return requestJson<SegmentListResponse>(
     queryString
       ? `/api/excel/jobs/${jobId}/segments?${queryString}`
       : `/api/excel/jobs/${jobId}/segments`,
   )
-  return parseJsonResponse<SegmentListResponse>(response)
 }
 
 export async function startJob(
@@ -121,17 +248,14 @@ export async function startJob(
   sourceLanguage: string,
   targetLanguage: string,
 ): Promise<JobSummary> {
-  const response = await fetch(`/api/excel/jobs/${jobId}/start`, {
+  return requestJson<JobSummary>(`/api/excel/jobs/${jobId}/start`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: buildHeaders(undefined, true),
     body: JSON.stringify({
       source_language: sourceLanguage,
       target_language: targetLanguage,
     }),
   })
-  return parseJsonResponse<JobSummary>(response)
 }
 
 export async function updateSegment(
@@ -139,45 +263,57 @@ export async function updateSegment(
   segmentId: string,
   finalText: string,
 ): Promise<Segment> {
-  const response = await fetch(`/api/excel/jobs/${jobId}/segments/${segmentId}`, {
+  return requestJson<Segment>(`/api/excel/jobs/${jobId}/segments/${segmentId}`, {
     method: 'PATCH',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: buildHeaders(undefined, true),
     body: JSON.stringify({ final_text: finalText }),
   })
-  return parseJsonResponse<Segment>(response)
+}
+
+export async function shareSegmentToMemory(
+  jobId: string,
+  segmentId: string,
+): Promise<TranslationMemoryEntry> {
+  return requestJson<TranslationMemoryEntry>(
+    `/api/excel/jobs/${jobId}/segments/${segmentId}/share-memory`,
+    {
+      method: 'POST',
+    },
+  )
 }
 
 export async function completeReview(jobId: string): Promise<JobSummary> {
-  const response = await fetch(`/api/excel/jobs/${jobId}/review-complete`, {
+  return requestJson<JobSummary>(`/api/excel/jobs/${jobId}/review-complete`, {
     method: 'POST',
   })
-  return parseJsonResponse<JobSummary>(response)
 }
 
 export async function previewJob(jobId: string): Promise<{ summary: PreviewSummary }> {
-  const response = await fetch(`/api/excel/jobs/${jobId}/preview`, {
+  return requestJson<{ summary: PreviewSummary }>(`/api/excel/jobs/${jobId}/preview`, {
     method: 'POST',
   })
-  return parseJsonResponse<{ summary: PreviewSummary }>(response)
 }
 
 export async function prepareDownload(jobId: string): Promise<ExportResponse> {
-  const response = await fetch(`/api/excel/jobs/${jobId}/download`, {
+  return requestJson<ExportResponse>(`/api/excel/jobs/${jobId}/download`, {
     method: 'POST',
   })
-  return parseJsonResponse<ExportResponse>(response)
+}
+
+export async function fetchDownloadedDocumentBlob(jobId: string): Promise<Blob> {
+  return requestBlob(`/api/excel/jobs/${jobId}/download`)
+}
+
+export async function fetchSourceDocumentBlob(jobId: string): Promise<Blob> {
+  return requestBlob(`/api/excel/jobs/${jobId}/source-document`)
 }
 
 export async function fetchKnowledgeSummary(): Promise<KnowledgeSummary> {
-  const response = await fetch('/api/knowledge/summary')
-  return parseJsonResponse<KnowledgeSummary>(response)
+  return requestJson<KnowledgeSummary>('/api/knowledge/summary')
 }
 
 export async function fetchGlossaryEntries(): Promise<GlossaryEntry[]> {
-  const response = await fetch('/api/knowledge/glossary')
-  return parseJsonResponse<GlossaryEntry[]>(response)
+  return requestJson<GlossaryEntry[]>('/api/knowledge/glossary')
 }
 
 export async function saveGlossaryEntry(payload: {
@@ -187,56 +323,42 @@ export async function saveGlossaryEntry(payload: {
   source_text: string
   translated_text: string
 }): Promise<GlossaryEntry> {
-  const response = await fetch('/api/knowledge/glossary', {
+  return requestJson<GlossaryEntry>('/api/knowledge/glossary', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: buildHeaders(undefined, true),
     body: JSON.stringify(payload),
   })
-  return parseJsonResponse<GlossaryEntry>(response)
 }
 
 export async function deleteGlossaryEntry(entryId: string): Promise<void> {
-  const response = await fetch(`/api/knowledge/glossary/${entryId}`, {
+  await requestVoid(`/api/knowledge/glossary/${entryId}`, {
     method: 'DELETE',
   })
-  if (!response.ok) {
-    await parseJsonResponse<{ detail: string }>(response)
-  }
 }
 
 export async function fetchProtectedTerms(): Promise<ProtectedTerm[]> {
-  const response = await fetch('/api/knowledge/protected-terms')
-  return parseJsonResponse<ProtectedTerm[]>(response)
+  return requestJson<ProtectedTerm[]>('/api/knowledge/protected-terms')
 }
 
 export async function saveProtectedTerm(payload: {
   id?: string
   term: string
 }): Promise<ProtectedTerm> {
-  const response = await fetch('/api/knowledge/protected-terms', {
+  return requestJson<ProtectedTerm>('/api/knowledge/protected-terms', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: buildHeaders(undefined, true),
     body: JSON.stringify(payload),
   })
-  return parseJsonResponse<ProtectedTerm>(response)
 }
 
 export async function deleteProtectedTerm(termId: string): Promise<void> {
-  const response = await fetch(`/api/knowledge/protected-terms/${termId}`, {
+  await requestVoid(`/api/knowledge/protected-terms/${termId}`, {
     method: 'DELETE',
   })
-  if (!response.ok) {
-    await parseJsonResponse<{ detail: string }>(response)
-  }
 }
 
 export async function fetchTranslationMemoryEntries(): Promise<TranslationMemoryEntry[]> {
-  const response = await fetch('/api/knowledge/memory')
-  return parseJsonResponse<TranslationMemoryEntry[]>(response)
+  return requestJson<TranslationMemoryEntry[]>('/api/knowledge/memory')
 }
 
 export async function saveTranslationMemoryEntry(payload: {
@@ -246,21 +368,78 @@ export async function saveTranslationMemoryEntry(payload: {
   source_text: string
   translated_text: string
 }): Promise<TranslationMemoryEntry> {
-  const response = await fetch('/api/knowledge/memory', {
+  return requestJson<TranslationMemoryEntry>('/api/knowledge/memory', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: buildHeaders(undefined, true),
     body: JSON.stringify(payload),
   })
-  return parseJsonResponse<TranslationMemoryEntry>(response)
 }
 
 export async function deleteTranslationMemoryEntry(entryId: string): Promise<void> {
-  const response = await fetch(`/api/knowledge/memory/${entryId}`, {
+  await requestVoid(`/api/knowledge/memory/${entryId}`, {
     method: 'DELETE',
   })
-  if (!response.ok) {
-    await parseJsonResponse<{ detail: string }>(response)
+}
+
+export async function fetchAccounts(filters: AccountListFilters): Promise<UserAccount[]> {
+  const params = new URLSearchParams()
+  if (filters.query.trim()) {
+    params.set('query', filters.query.trim())
   }
+  if (filters.role) {
+    params.set('role', filters.role)
+  }
+  if (filters.isActive !== 'all') {
+    params.set('is_active', filters.isActive)
+  }
+  const queryString = params.toString()
+  return requestJson<UserAccount[]>(
+    queryString ? `/api/admin/accounts?${queryString}` : '/api/admin/accounts',
+  )
+}
+
+export async function saveAccount(payload: {
+  id?: string
+  username: string
+  role: 'admin' | 'user'
+  is_active: boolean
+  password?: string
+}): Promise<UserAccount> {
+  return requestJson<UserAccount>('/api/admin/accounts', {
+    method: 'POST',
+    headers: buildHeaders(undefined, true),
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function deleteAccount(accountId: string): Promise<void> {
+  await requestVoid(`/api/admin/accounts/${accountId}`, {
+    method: 'DELETE',
+  })
+}
+
+export async function fetchActivity(filters: ActivityFilters): Promise<ActivityListResponse> {
+  const params = new URLSearchParams()
+  if (filters.userId.trim()) {
+    params.set('user_id', filters.userId.trim())
+  }
+  if (filters.actionType.trim()) {
+    params.set('action_type', filters.actionType.trim())
+  }
+  if (filters.targetType.trim()) {
+    params.set('target_type', filters.targetType.trim())
+  }
+  if (filters.query.trim()) {
+    params.set('query', filters.query.trim())
+  }
+  if (filters.dateFrom.trim()) {
+    params.set('date_from', filters.dateFrom.trim())
+  }
+  if (filters.dateTo.trim()) {
+    params.set('date_to', filters.dateTo.trim())
+  }
+  const queryString = params.toString()
+  return requestJson<ActivityListResponse>(
+    queryString ? `/api/admin/activity?${queryString}` : '/api/admin/activity',
+  )
 }

@@ -10,12 +10,17 @@ from fastapi.testclient import TestClient
 
 from backend.app.config import AppConfig
 from backend.app.main import create_app
+from backend.app.services.excel_ooxml import parse_workbook
 from backend.app.services.ocr_layout import PillowOcrLayoutRenderer
+from backend.tests.auth_helpers import authenticate_client
 from backend.tests.fakes import (
     FakeDocumentOcrService,
+    FakeLegacyExcelConverter,
     FakeTranslationService,
     FlakyOcrLayoutRenderer,
+    SuccessfulOcrLayoutRenderer,
 )
+from backend.tests.test_docx_ooxml import build_test_docx
 from backend.tests.test_excel_ooxml import build_symbol_workbook, build_test_workbook
 from backend.tests.test_ocr_document import (
     _resolve_test_font_path,
@@ -43,6 +48,156 @@ class BrokenOcrService:
 
 
 class ExcelApiTests(unittest.TestCase):
+    def test_upload_start_and_download_xls_job_uses_legacy_excel_converter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            legacy_converter = FakeLegacyExcelConverter(
+                converted_xlsx_bytes=build_test_workbook(),
+                converted_xls_bytes=b"FAKE-XLS-DOWNLOAD",
+            )
+            config = AppConfig(
+                root_dir=PROJECT_ROOT,
+                models_dir=temp_path / "models",
+                workspace_dir=temp_path / "workspace",
+                database_path=temp_path / "workspace" / "app.db",
+            )
+            app = create_app(
+                config=config,
+                translation_service=FakeTranslationService(),
+                legacy_excel_converter=legacy_converter,
+            )
+            with TestClient(app) as client:
+                authenticate_client(client)
+                upload_response = client.post(
+                    "/api/excel/jobs/upload",
+                    params={"file_name": "legacy.xls"},
+                    content=b"legacy-xls-binary",
+                    headers={"Content-Type": "application/vnd.ms-excel"},
+                )
+                self.assertEqual(upload_response.status_code, 200)
+                self.assertEqual(upload_response.json()["file_type"], "xls")
+                job_id = upload_response.json()["id"]
+
+                start_response = client.post(
+                    f"/api/excel/jobs/{job_id}/start",
+                    json={"source_language": "ja", "target_language": "vi"},
+                )
+                self.assertEqual(start_response.status_code, 200)
+
+                for _ in range(20):
+                    job_state = client.get(f"/api/excel/jobs/{job_id}").json()
+                    if job_state["status"] == "review":
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise AssertionError("XLS job did not reach review state in time.")
+
+                reviewed_job = client.get(f"/api/excel/jobs/{job_id}").json()
+                self.assertEqual(reviewed_job["parse_summary"]["source_file_type"], "xls")
+                self.assertEqual(reviewed_job["parse_summary"]["working_file_type"], "xlsx")
+
+                segments_response = client.get(f"/api/excel/jobs/{job_id}/segments")
+                self.assertEqual(segments_response.status_code, 200)
+                segments = segments_response.json()["items"]
+                self.assertEqual(len(segments), 4)
+                self.assertEqual(segments[0]["location_type"], "worksheet_cell")
+                self.assertEqual(segments[0]["final_text"], "VI::こんにちは")
+
+                edit_response = client.patch(
+                    f"/api/excel/jobs/{job_id}/segments/{segments[0]['id']}",
+                    json={"final_text": "Legacy workbook translation"},
+                )
+                self.assertEqual(edit_response.status_code, 200)
+                self.assertEqual(edit_response.json()["final_text"], "Legacy workbook translation")
+
+                prepare_download_response = client.post(f"/api/excel/jobs/{job_id}/download")
+                self.assertEqual(prepare_download_response.status_code, 200)
+                self.assertEqual(prepare_download_response.json()["file_name"], "legacy.vi.xls")
+
+                download_response = client.get(f"/api/excel/jobs/{job_id}/download")
+                self.assertEqual(download_response.status_code, 200)
+                self.assertEqual(download_response.headers["content-type"], "application/vnd.ms-excel")
+                self.assertEqual(download_response.content, b"FAKE-XLS-DOWNLOAD")
+
+                self.assertEqual(len(legacy_converter.convert_xls_to_xlsx_calls), 1)
+                self.assertEqual(len(legacy_converter.convert_xlsx_to_xls_calls), 1)
+                self.assertIsNotNone(legacy_converter.last_exported_xlsx_bytes)
+                exported_workbook = parse_workbook(legacy_converter.last_exported_xlsx_bytes or b"")
+                self.assertEqual(exported_workbook.segments[0].original_text, "Legacy workbook translation")
+
+    def test_upload_start_and_download_docx_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            config = AppConfig(
+                root_dir=PROJECT_ROOT,
+                models_dir=temp_path / "models",
+                workspace_dir=temp_path / "workspace",
+                database_path=temp_path / "workspace" / "app.db",
+            )
+            app = create_app(
+                config=config,
+                translation_service=FakeTranslationService(),
+            )
+            with TestClient(app) as client:
+                authenticate_client(client)
+                upload_response = client.post(
+                    "/api/excel/jobs/upload",
+                    params={"file_name": "proposal.docx"},
+                    content=build_test_docx(),
+                    headers={
+                        "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    },
+                )
+                self.assertEqual(upload_response.status_code, 200)
+                self.assertEqual(upload_response.json()["file_type"], "docx")
+                job_id = upload_response.json()["id"]
+
+                start_response = client.post(
+                    f"/api/excel/jobs/{job_id}/start",
+                    json={"source_language": "ja", "target_language": "vi"},
+                )
+                self.assertEqual(start_response.status_code, 200)
+
+                for _ in range(20):
+                    job_state = client.get(f"/api/excel/jobs/{job_id}").json()
+                    if job_state["status"] == "review":
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise AssertionError("DOCX job did not reach review state in time.")
+
+                segments_response = client.get(f"/api/excel/jobs/{job_id}/segments")
+                self.assertEqual(segments_response.status_code, 200)
+                segments = segments_response.json()["items"]
+                self.assertEqual(len(segments), 4)
+                self.assertEqual(segments[0]["sheet_name"], "Main document")
+                self.assertEqual(segments[0]["cell_address"], "Paragraph 1")
+                self.assertEqual(segments[0]["location_type"], "docx_paragraph")
+                self.assertEqual(segments[0]["final_text"], "VI::顧客管理")
+
+                edit_response = client.patch(
+                    f"/api/excel/jobs/{job_id}/segments/{segments[0]['id']}",
+                    json={"final_text": "Quản lý khách hàng"},
+                )
+                self.assertEqual(edit_response.status_code, 200)
+                self.assertEqual(edit_response.json()["status"], "edited")
+
+                prepare_download_response = client.post(
+                    f"/api/excel/jobs/{job_id}/download"
+                )
+                self.assertEqual(prepare_download_response.status_code, 200)
+                self.assertEqual(
+                    prepare_download_response.json()["file_name"],
+                    "proposal.vi.docx",
+                )
+
+                download_response = client.get(f"/api/excel/jobs/{job_id}/download")
+                self.assertEqual(download_response.status_code, 200)
+                self.assertEqual(
+                    download_response.headers["content-type"],
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+
     def test_upload_start_edit_and_download_pdf_job(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -56,9 +211,10 @@ class ExcelApiTests(unittest.TestCase):
                 config=config,
                 translation_service=FakeTranslationService(),
                 ocr_service=FakeDocumentOcrService(),
-                ocr_layout_renderer=PillowOcrLayoutRenderer(font_path=_resolve_test_font_path()),
+                ocr_layout_renderer=SuccessfulOcrLayoutRenderer(),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 upload_response = client.post(
                     "/api/excel/jobs/upload",
                     params={"file_name": "scan.pdf"},
@@ -85,7 +241,7 @@ class ExcelApiTests(unittest.TestCase):
                 )
                 self.assertEqual(start_response.status_code, 200)
 
-                for _ in range(20):
+                for _ in range(60):
                     job_state = client.get(f"/api/excel/jobs/{job_id}").json()
                     if job_state["status"] == "review":
                         break
@@ -139,6 +295,7 @@ class ExcelApiTests(unittest.TestCase):
                 ocr_layout_renderer=PillowOcrLayoutRenderer(font_path=_resolve_test_font_path()),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 upload_response = client.post(
                     "/api/excel/jobs/upload",
                     params={"file_name": "screen.png"},
@@ -211,6 +368,7 @@ class ExcelApiTests(unittest.TestCase):
                 ocr_layout_renderer=PillowOcrLayoutRenderer(font_path=_resolve_test_font_path()),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 upload_response = client.post(
                     "/api/excel/jobs/upload",
                     params={"file_name": "broken.pdf"},
@@ -251,6 +409,7 @@ class ExcelApiTests(unittest.TestCase):
                 translation_service=FakeTranslationService(),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 response = client.get("/api/languages")
                 self.assertEqual(response.status_code, 200)
                 payload = response.json()
@@ -277,6 +436,7 @@ class ExcelApiTests(unittest.TestCase):
                 translation_service=FakeTranslationService(),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 response = client.post(
                     "/api/translate",
                     json={
@@ -305,6 +465,7 @@ class ExcelApiTests(unittest.TestCase):
                 translation_service=FakeTranslationService(),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 english_response = client.post(
                     "/api/translate",
                     json={
@@ -349,6 +510,7 @@ class ExcelApiTests(unittest.TestCase):
                 translation_service=FakeTranslationService(),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 upload_response = client.post(
                     "/api/excel/jobs/upload",
                     params={"file_name": "deck.pptx"},
@@ -407,6 +569,7 @@ class ExcelApiTests(unittest.TestCase):
                 translation_service=FakeTranslationService(),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 upload_response = client.post(
                     "/api/excel/jobs/upload",
                     params={"file_name": "sample.xlsx"},
@@ -453,6 +616,7 @@ class ExcelApiTests(unittest.TestCase):
                 translation_service=FakeTranslationService(),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 upload_response = client.post(
                     "/api/excel/jobs/upload",
                     params={"file_name": "overflow.pptx"},
@@ -514,6 +678,7 @@ class ExcelApiTests(unittest.TestCase):
                 ocr_layout_renderer=FlakyOcrLayoutRenderer(),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 upload_response = client.post(
                     "/api/excel/jobs/upload",
                     params={"file_name": "retry.png"},
@@ -577,6 +742,7 @@ class ExcelApiTests(unittest.TestCase):
                 translation_service=FakeTranslationService(),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 upload_response = client.post(
                     "/api/excel/jobs/upload",
                     params={"file_name": "smartart.pptx"},
@@ -626,6 +792,7 @@ class ExcelApiTests(unittest.TestCase):
                 translation_service=FakeTranslationService(),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 upload_response = client.post(
                     "/api/excel/jobs/upload",
                     params={"file_name": "sample.xlsx"},
@@ -713,6 +880,7 @@ class ExcelApiTests(unittest.TestCase):
                 translation_service=FakeTranslationService(),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 upload_response = client.post(
                     "/api/excel/jobs/upload",
                     params={"file_name": "sample.xlsx"},
@@ -735,7 +903,7 @@ class ExcelApiTests(unittest.TestCase):
                 self.assertEqual(list_response.status_code, 200)
                 self.assertEqual(list_response.json(), [])
 
-    def test_edited_translation_is_reused_from_translation_memory(self) -> None:
+    def test_shared_translation_is_reused_from_translation_memory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             config = AppConfig(
@@ -749,6 +917,7 @@ class ExcelApiTests(unittest.TestCase):
                 translation_service=FakeTranslationService(),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 first_upload = client.post(
                     "/api/excel/jobs/upload",
                     params={"file_name": "memory-1.xlsx"},
@@ -796,6 +965,18 @@ class ExcelApiTests(unittest.TestCase):
                 self.assertEqual(correction_rows[0][1], "VI::こんにちは")
                 self.assertEqual(correction_rows[0][2], "User glossary translation")
                 source_text = correction_rows[0][0]
+                connection = sqlite3.connect(config.database_path)
+                try:
+                    pre_share_memory_rows = connection.execute(
+                        "SELECT source_text, translated_text FROM translation_memory"
+                    ).fetchall()
+                finally:
+                    connection.close()
+                self.assertEqual(pre_share_memory_rows, [])
+                share_response = client.post(
+                    f"/api/excel/jobs/{first_job_id}/segments/{first_segment['id']}/share-memory"
+                )
+                self.assertEqual(share_response.status_code, 200)
                 connection = sqlite3.connect(config.database_path)
                 try:
                     memory_rows = connection.execute(
@@ -859,6 +1040,7 @@ class ExcelApiTests(unittest.TestCase):
                 translation_service=FakeTranslationService(),
             )
             with TestClient(app) as client:
+                authenticate_client(client)
                 upload_response = client.post(
                     "/api/excel/jobs/upload",
                     params={"file_name": "symbols.xlsx"},

@@ -17,7 +17,7 @@ export function Modal({ title, open, onClose, children }: ModalProps) {
       <div className="modal-card">
         <div className="modal-header">
           <h2>{title}</h2>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="Close preview">
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Close dialog">
             ×
           </button>
         </div>

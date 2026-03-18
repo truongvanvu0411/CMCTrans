@@ -20,9 +20,14 @@ def _parse_timestamp(value: str) -> datetime:
 
 
 class JobRepository:
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        lock: threading.RLock | None = None,
+    ) -> None:
         self._connection = connection
-        self._lock = threading.RLock()
+        self._lock = lock or threading.RLock()
 
     def create_job(self, record: JobRecord) -> None:
         with self._lock:
@@ -33,6 +38,7 @@ class JobRepository:
                     original_file_name,
                     original_file_path,
                     output_file_path,
+                    owner_user_id,
                     file_type,
                     status,
                     current_step,
@@ -50,13 +56,14 @@ class JobRepository:
                     translation_summary_json,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
                     record.original_file_name,
                     record.original_file_path,
                     record.output_file_path,
+                    record.owner_user_id,
                     record.file_type,
                     record.status,
                     record.current_step,
@@ -154,10 +161,17 @@ class JobRepository:
         return self._map_job(row)
 
     def list_jobs(self) -> list[JobRecord]:
+        return self.list_jobs_for_owner(owner_user_id=None)
+
+    def list_jobs_for_owner(self, owner_user_id: str | None) -> list[JobRecord]:
+        sql = "SELECT * FROM jobs"
+        parameters: list[object] = []
+        if owner_user_id is not None:
+            sql += " WHERE owner_user_id = ?"
+            parameters.append(owner_user_id)
+        sql += " ORDER BY updated_at DESC"
         with self._lock:
-            rows = self._connection.execute(
-                "SELECT * FROM jobs ORDER BY updated_at DESC"
-            ).fetchall()
+            rows = self._connection.execute(sql, tuple(parameters)).fetchall()
         return [self._map_job(row) for row in rows]
 
     def delete_job(self, job_id: str) -> None:
@@ -373,6 +387,7 @@ class JobRepository:
             original_file_name=str(row["original_file_name"]),
             original_file_path=str(row["original_file_path"]),
             output_file_path=str(row["output_file_path"]) if row["output_file_path"] else None,
+            owner_user_id=str(row["owner_user_id"]) if row["owner_user_id"] else None,
             file_type=str(row["file_type"]),
             status=str(row["status"]),
             current_step=str(row["current_step"]),
